@@ -1,0 +1,15 @@
+server/.venv/
+server/.token
+server/settings.json
+downloads/*
+!downloads/.gitkeep
+__pycache__/
+*.pyc
+# Capturas de diagnostico: un .har contiene la sesion viva (cookies, URLs
+# firmadas). Nunca debe entrar al repo ni al paquete.
+*.har
+image.png
+
+# Paquete distribuible: se genera con tools/package.py
+video-dl-windows.zip
+*.zip

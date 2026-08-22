@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <title>video-dl · Opciones</title>
+    <style>
+      body { font: 14px/1.5 system-ui, sans-serif; max-width: 560px; margin: 40px auto; padding: 0 16px; color: #1f2933; }
+      h1 { font-size: 18px; }
+      h2 { font-size: 14px; margin: 32px 0 4px; padding-top: 20px; border-top: 1px solid #e5e7eb; }
+      label { display: block; margin: 14px 0 4px; font-weight: 600; }
+      input[type="text"], input[type="number"] { width: 100%; padding: 7px; border: 1px solid #d1d5db; border-radius: 5px; font-family: ui-monospace, monospace; }
+      p.hint { font-size: 12px; color: #6b7280; margin: 4px 0 0; }
+      button { margin-top: 20px; padding: 8px 16px; background: #2563eb; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+      button:disabled { opacity: .5; cursor: default; }
+      .saved { color: #16a34a; font-size: 13px; margin-left: 10px; }
+      .err { color: #991b1b; font-size: 13px; margin-left: 10px; }
+      .preset { display: flex; gap: 9px; align-items: flex-start; padding: 9px; border: 1px solid #e5e7eb; border-radius: 6px; margin-bottom: 7px; cursor: pointer; font-weight: 400; }
+      .preset:hover { background: #f9fafb; }
+      .preset input { margin-top: 3px; }
+      .preset b { display: block; }
+      .preset span { font-size: 12px; color: #6b7280; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      .grid label { margin-top: 8px; }
+      details { margin-top: 12px; }
+      summary { cursor: pointer; font-size: 13px; color: #2563eb; }
+      .note { background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 10px; font-size: 12px; color: #78350f; margin-top: 10px; }
+      .check-inline { display: flex; align-items: center; gap: 7px; font-weight: 400; }
+      .hint.danger { color: #991b1b; }
+      select { width: 100%; padding: 7px; border: 1px solid #d1d5db; border-radius: 5px; }
+      .estado { padding: 9px; border-radius: 6px; font-size: 12px; margin: 10px 0; }
+      .estado.ok { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+      .estado.falta { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    </style>
+  </head>
+  <body>
+    <h1>video-dl · Opciones</h1>
+
+    <label for="serverUrl">URL del servidor</label>
+    <input id="serverUrl" type="text" />
+    <p class="hint">Por defecto <code>http://127.0.0.1:3210</code>.</p>
+
+    <label for="token">Token</label>
+    <input id="token" type="text" />
+    <p class="hint">Lo imprime el servidor al arrancar. También está en <code>server/.token</code>.</p>
+
+    <button id="save-conn">Guardar conexión</button><span id="saved-conn" class="saved"></span>
+
+    <h2>Ritmo de descarga</h2>
+    <p class="hint">
+      Las descargas se hacen de a una, con una pausa entre cada video. Bajar el
+      ritmo evita los errores 429 y que un curso te sature la conexión.
+    </p>
+
+    <div id="presets"></div>
+
+    <details>
+      <summary>Ajuste manual</summary>
+      <div class="grid">
+        <div>
+          <label for="rate_limit_kbps">Velocidad máx. (KB/s)</label>
+          <input id="rate_limit_kbps" type="number" min="0" />
+          <p class="hint">0 = sin límite</p>
+        </div>
+        <div>
+          <label for="gap_min">Pausa entre trabajos (s)</label>
+          <div class="grid">
+            <input id="gap_min" type="number" min="0" title="mínimo" />
+            <input id="gap_max" type="number" min="0" title="máximo" />
+          </div>
+          <p class="hint">mín / máx — se elige al azar</p>
+        </div>
+        <div>
+          <label for="video_sleep_min">Pausa entre videos (s)</label>
+          <div class="grid">
+            <input id="video_sleep_min" type="number" min="0" title="mínimo" />
+            <input id="video_sleep_max" type="number" min="0" title="máximo" />
+          </div>
+          <p class="hint">dentro de una playlist / curso</p>
+        </div>
+      </div>
+      <button id="save-throttle">Guardar ritmo</button><span id="saved-throttle" class="saved"></span>
+    </details>
+
+    <h2>Subida automática (Drive u otro remoto)</h2>
+    <p class="hint">
+      Después de bajar cada clase, la sube con <code>rclone</code>. Opcionalmente
+      borra la copia local, para que un curso largo no te llene el disco.
+    </p>
+
+    <div id="rclone-estado"></div>
+
+    <label class="check-inline">
+      <input type="checkbox" id="up-enabled" /> Subir automáticamente
+    </label>
+
+    <label for="up-remote">Remoto de rclone</label>
+    <select id="up-remote"></select>
+    <p class="hint">Los que tengas configurados con <code>rclone config</code>.</p>
+
+    <label for="up-folder">Carpeta base en el remoto</label>
+    <input id="up-folder" type="text" placeholder="Cursos" />
+    <p class="hint">Cada curso crea su subcarpeta acá adentro.</p>
+
+    <label class="check-inline">
+      <input type="checkbox" id="up-delete" /> Borrar el archivo local después de subirlo
+    </label>
+    <p class="hint danger">
+      Irreversible. Si la subida falla, el local <b>no</b> se borra.
+    </p>
+
+    <button id="save-upload">Guardar subida</button><span id="saved-upload" class="saved"></span>
+
+    <div class="note">
+      <b>Qué hace y qué no.</b> Bajar el ritmo reduce la señal de "esto es un
+      scraper", pero no cambia que las descargas salen con tu sesión ni que el
+      cliente no es el reproductor del sitio. Lo que más pesa sigue siendo
+      <b>cuánto</b> descargás.
+    </div>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>video-dl</title>
+  </head>
+  <body>
+    <header>
+      <h1>video-dl</h1>
+      <span id="status" class="dot offline" title="Estado del servidor"></span>
+    </header>
+
+    <section class="target">
+      <div id="url" class="url">—</div>
+      <div id="probe-result" class="probe hidden"></div>
+    </section>
+
+    <section class="controls">
+      <label>
+        Calidad
+        <select id="quality">
+          <option value="best">Mejor disponible</option>
+          <option value="1080">1080p máx.</option>
+          <option value="720">720p máx.</option>
+          <option value="480">480p máx.</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" id="cookies" checked /> Usar cookies del navegador</label>
+      <label class="check"><input type="checkbox" id="subtitles" /> Descargar subtítulos</label>
+      <label class="check"><input type="checkbox" id="audio" /> Solo audio (mp3)</label>
+    </section>
+
+    <section class="actions">
+      <button id="probe" class="secondary">Analizar</button>
+      <button id="download" class="primary">Descargar</button>
+    </section>
+
+    <button id="download-course" class="primary full hidden"></button>
+
+    <div id="message" class="message hidden"></div>
+
+    <section class="jobs">
+      <div class="jobs-head">
+        <h2>Descargas</h2>
+        <button id="clear" class="link">Limpiar terminadas</button>
+      </div>
+      <ul id="job-list"></ul>
+    </section>
+
+    <footer><a href="#" id="options">Opciones</a></footer>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
