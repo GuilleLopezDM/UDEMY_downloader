@@ -335,4 +335,11 @@ if __name__ == "__main__":
         for stale in ORPHANS_SWEPT:
             banner(f"      {stale}")
     banner("=" * 62)
-    uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("VIDEO_DL_PORT", 3210)))
+    # Por defecto sólo loopback. `VIDEO_DL_HOST` permite exponerlo en una IP
+    # concreta —típicamente la de Tailscale— para depurar desde otra máquina.
+    # Se usa una IP puntual y no 0.0.0.0 a propósito: con 0.0.0.0 quedaría
+    # escuchando también en el WiFi y en cualquier otra red donde esté el equipo.
+    host = os.environ.get("VIDEO_DL_HOST", "127.0.0.1")
+    if host != "127.0.0.1":
+        banner(f"  ⚠ Escuchando en {host} — accesible desde otras máquinas de esa red")
+    uvicorn.run(app, host=host, port=int(os.environ.get("VIDEO_DL_PORT", 3210)))

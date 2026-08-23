@@ -13,3 +13,8 @@ image.png
 # Paquete distribuible: se genera con tools/package.py
 video-dl-windows.zip
 *.zip
+
+# Credenciales de OAuth (client_id / client_secret de Google).
+.env
+*.env
+credentials.json
