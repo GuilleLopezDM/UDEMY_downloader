@@ -14,9 +14,11 @@ h2 { font-size: 12px; margin: 0; text-transform: uppercase; letter-spacing: .04e
 .dot.online { background: #16a34a; }
 .dot.offline { background: #dc2626; }
 .url {
-  font-size: 11px; color: #4b5563; word-break: break-all;
-  background: #f3f4f6; padding: 6px 8px; border-radius: 5px; max-height: 46px; overflow: hidden;
+  display: block; width: 100%; font-size: 11px; color: #1f2933;
+  background: #f3f4f6; padding: 6px 8px; border-radius: 5px;
+  border: 1px solid #e5e7eb; font-family: inherit;
 }
+.url:focus { outline: none; border-color: #2563eb; background: #fff; }
 .probe { margin-top: 6px; font-size: 12px; color: #374151; }
 .controls { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
 .controls label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

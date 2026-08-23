@@ -1,17 +1,29 @@
 import { api, collectCookies } from "./api.js";
 
 const $ = (id) => document.getElementById(id);
-let currentUrl = "";
+
+// La URL sale del campo editable, no de una variable fija. Udemy redirige la
+// página del curso a la última clase vista, así que la pestaña activa muchas
+// veces NO tiene la URL que uno quiere encolar. El campo se precarga con la de
+// la pestaña y se puede pegar otra encima.
+const urlActual = () => $("url").value.trim();
+
 let pollTimer = null;
+
+function actualizarBotones() {
+  const usable = /^https?:/.test(urlActual());
+  $("download").disabled = !usable;
+  $("probe").disabled = !usable;
+  // El botón de curso completo depende de un análisis previo: si cambia la URL,
+  // lo que decía deja de corresponder.
+  if (!usable) $("download-course").className = "primary full hidden";
+}
 
 async function init() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  currentUrl = tab?.url || "";
-  $("url").textContent = currentUrl || "Sin URL en esta pestaña";
-
-  const usable = /^https?:/.test(currentUrl);
-  $("download").disabled = !usable;
-  $("probe").disabled = !usable;
+  $("url").value = tab?.url || "";
+  actualizarBotones();
+  $("url").addEventListener("input", actualizarBotones);
 
   $("probe").addEventListener("click", onProbe);
   $("download").addEventListener("click", onDownload);
@@ -62,7 +74,7 @@ async function cookiesIfWanted() {
 
   let cookies;
   try {
-    cookies = await collectCookies(currentUrl);
+    cookies = await collectCookies(urlActual());
   } catch (e) {
     throw new Error(`No se pudieron leer las cookies: ${e.message}`);
   }
@@ -81,7 +93,7 @@ async function onProbe() {
   $("probe").disabled = true;
   $("probe").textContent = "Analizando…";
   try {
-    const info = await api.probe(currentUrl, await cookiesIfWanted());
+    const info = await api.probe(urlActual(), await cookiesIfWanted());
     const box = $("probe-result");
     box.className = "probe";
     const boton = $("download-course");
@@ -99,8 +111,8 @@ async function onProbe() {
   } catch (e) {
     showMessage(e.message, "error");
   } finally {
-    $("probe").disabled = false;
     $("probe").textContent = "Analizar";
+    actualizarBotones();
   }
 }
 
@@ -109,7 +121,7 @@ async function onDownload() {
   $("download").disabled = true;
   try {
     await api.download({
-      url: currentUrl,
+      url: urlActual(),
       cookies: await cookiesIfWanted(),
       quality: $("quality").value,
       subtitles: $("subtitles").checked,
@@ -134,7 +146,7 @@ async function onDownloadCourse() {
   boton.textContent = "Enumerando el curso…";
   try {
     const r = await api.downloadPlaylist({
-      url: currentUrl,
+      url: urlActual(),
       cookies: await cookiesIfWanted(),
       quality: $("quality").value,
       subtitles: $("subtitles").checked,
