@@ -6,6 +6,7 @@ según el perfil de `throttle`. Ver README, sección "Ritmo de descarga".
 
 import os
 import random
+import re
 import threading
 import time
 import uuid
@@ -20,7 +21,7 @@ import upload_config
 import uploader
 from cookies import discard, write_netscape_cookiefile
 from naming import carpeta_para
-from urls import normalize
+from urls import normalize, preservar_portal
 
 
 # Estados de los que un job ya no sale. Se listan una sola vez: estaban
@@ -187,9 +188,13 @@ class JobManager:
 
         creados = []
         for indice, entrada in enumerate(utiles, start=1):
+            # yt-dlp devuelve las clases sobre www.udemy.com y eso pierde el
+            # portal de Udemy Business, donde vive la inscripción. Ver
+            # `preservar_portal`.
+            destino = preservar_portal(url, entrada["url"])
             creados.append(
                 self.enqueue(
-                    entrada["url"], cookies, quality, subtitles, audio_only,
+                    destino, cookies, quality, subtitles, audio_only,
                     title=entrada.get("title"),
                     position=indice, total=len(utiles),
                     subfolder=carpeta,
@@ -484,9 +489,15 @@ class JobManager:
             info = d.get("info_dict") or {}
             job.filepath = info.get("filepath") or job.filepath
 
-    @staticmethod
-    def _explain(message: str) -> str:
+    # yt-dlp colorea su salida con secuencias ANSI. En una terminal se ven como
+    # color; en el popup y en un archivo de log quedan como basura tipo
+    # `\x1b[0;31mERROR:\x1b[0m`, que además estorba al leer el mensaje real.
+    _ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+    @classmethod
+    def _explain(cls, message: str) -> str:
         """Turn the most common yt-dlp failures into something actionable."""
+        message = cls._ANSI.sub("", message).strip()
         low = message.lower()
         if "drm" in low or "widevine" in low:
             return (
