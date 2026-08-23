@@ -19,7 +19,6 @@ Business, que fue donde se buscó primero.
 """
 
 import re
-from urllib.parse import urlsplit, urlunsplit
 
 # /course/<slug>/learn/lecture/<id>  → el formato que usa Udemy hoy
 _UDEMY_LECTURE = re.compile(
@@ -33,24 +32,31 @@ _UDEMY_COURSE = re.compile(
 )
 
 
+_ID_DE_CLASE = re.compile(r"/lecture/(?P<id>\d+)")
+
+
 def preservar_portal(url_curso: str, url_clase: str) -> str:
-    """Devuelve `url_clase` con el host del curso original.
+    """Rearma la URL de una clase sobre el portal y el slug del curso original.
 
-    El extractor de cursos de yt-dlp arma las URLs de cada clase sobre
-    `www.udemy.com` (línea 458 de `yt_dlp/extractor/udemy.py`), y eso pierde el
-    subdominio del portal en las cuentas de Udemy Business. La inscripción vive
-    en ese portal —`algo.udemy.com`—, así que `www` responde 403 aunque las
-    cookies estén perfectas.
+    No alcanza con cambiar el host. El extractor de cursos de yt-dlp arma cada
+    clase como `www.udemy.com/<slug>/learn/v4/t/lecture/<id>` (línea 458 de
+    `yt_dlp/extractor/udemy.py`): host equivocado **y** path sin `/course/`.
 
-    Sólo reescribe entre hosts de udemy.com: cualquier otra cosa pasa intacta.
+    Y el path importa porque el extractor de clase saca el `course_id`
+    **leyendo esa página** (`_real_extract` → `_download_webpage` →
+    `_extract_course_info`). Si la página no existe, se queda sin `course_id`
+    y la llamada a la API devuelve 403.
+
+    Así que se reconstruye con la forma que sí demostró funcionar en este
+    portal: `https://<portal>/course/<slug>/#/lecture/<id>`.
+
+    Si algo no se puede parsear, devuelve la URL original en vez de inventar.
     """
-    host_curso = urlsplit(url_curso).netloc
-    partes = urlsplit(url_clase)
-    if not host_curso or not partes.netloc.endswith("udemy.com"):
+    m_id = _ID_DE_CLASE.search(url_clase)
+    m_curso = _UDEMY_COURSE.match(url_curso)
+    if not m_id or not m_curso:
         return url_clase
-    if partes.netloc == host_curso:
-        return url_clase
-    return urlunsplit((partes.scheme, host_curso, partes.path, partes.query, partes.fragment))
+    return f"{m_curso['base']}/course/{m_curso['slug']}/#/lecture/{m_id['id']}"
 
 
 def normalize(url: str) -> str:
