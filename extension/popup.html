@@ -8,12 +8,17 @@
   <body>
     <header>
       <h1>video-dl</h1>
-      <span id="status" class="dot offline" title="Estado del servidor"></span>
+      <span id="status" class="dot offline" role="status"
+            aria-label="Servidor no disponible" title="Estado del servidor"></span>
     </header>
 
     <section class="target">
-      <input id="url" class="url" type="text" spellcheck="false"
-             placeholder="Pegá una URL, o usá la de la pestaña actual" />
+      <label class="sr-only" for="url">URL del video o del curso</label>
+      <div class="url-row">
+        <input id="url" class="url" type="text" spellcheck="false"
+               placeholder="Pegá una URL, o usá la de la pestaña actual" />
+        <button id="pin" class="secondary pin" title="Fijar esta URL para las próximas veces">Fijar</button>
+      </div>
       <div id="probe-result" class="probe hidden"></div>
     </section>
 
@@ -39,17 +44,23 @@
 
     <button id="download-course" class="primary full hidden"></button>
 
-    <div id="message" class="message hidden"></div>
+    <div id="message" class="message hidden" role="status" aria-live="polite"></div>
 
     <section class="jobs">
       <div class="jobs-head">
         <h2>Descargas</h2>
-        <button id="clear" class="link">Limpiar terminadas</button>
+        <div class="jobs-acciones">
+          <button id="cancel-all" class="link hidden">Cancelar todo</button>
+          <button id="clear" class="link">Limpiar terminadas</button>
+        </div>
       </div>
       <ul id="job-list"></ul>
     </section>
 
-    <footer><a href="#" id="options">Opciones</a></footer>
+    <footer>
+      <span id="ruta" class="ruta" title="Carpeta de descargas"></span>
+      <a href="#" id="options">Opciones</a>
+    </footer>
     <script type="module" src="popup.js"></script>
   </body>
 </html>

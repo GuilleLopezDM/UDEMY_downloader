@@ -1,0 +1,4 @@
+# Dependencias solo para correr los tests. No entran al paquete distribuible
+# (tools/package.py usa lista blanca y no las declara).
+-r requirements.txt
+pytest>=8.0

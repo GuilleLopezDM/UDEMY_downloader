@@ -51,18 +51,46 @@ _lock = threading.Lock()
 _current = Throttle()
 
 
+# Topes superiores. No están para "proteger el servidor" —lo maneja su dueño—
+# sino porque los valores se PERSISTEN: un cero de más en el campo de pausa
+# deja la cola congelada durante horas y la única pista es que no pasa nada.
+TOPE_PAUSA = 3600          # 1 h entre trabajos ya es más que cualquier uso real
+TOPE_VELOCIDAD = 100_000   # 100 MB/s: por encima de eso no es un límite
+
+
+def _entero(valor, defecto: int) -> int:
+    """Convierte a int sin lanzar.
+
+    `int("abc")` reventaba con ValueError. `load()` lo atrapaba, pero `save()`
+    no: un POST a /settings con un valor raro salía como 500 con traceback en
+    vez de guardarse ignorando el campo.
+    """
+    try:
+        return int(valor)
+    except (TypeError, ValueError):
+        return defecto
+
+
+def _acotar(valor: int, tope: int) -> int:
+    return max(0, min(valor, tope))
+
+
 def _coerce(data: dict) -> Throttle:
     """Build a Throttle from untrusted JSON, ignoring unknown keys."""
     valid = {f.name for f in fields(Throttle)}
-    clean = {k: v for k, v in data.items() if k in valid}
-    t = Throttle(**{**asdict(Throttle()), **clean})
+    base = asdict(Throttle())
+    clean = {k: v for k, v in (data or {}).items() if k in valid}
+    t = Throttle(**{**base, **clean})
+    t.preset = str(t.preset or "custom")
     # Un gap_max menor que gap_min haría que random.uniform devuelva un rango
     # invertido; lo normalizamos en vez de fallar.
-    t.rate_limit_kbps = max(0, int(t.rate_limit_kbps))
-    t.gap_min = max(0, int(t.gap_min))
-    t.gap_max = max(t.gap_min, int(t.gap_max))
-    t.video_sleep_min = max(0, int(t.video_sleep_min))
-    t.video_sleep_max = max(t.video_sleep_min, int(t.video_sleep_max))
+    t.rate_limit_kbps = _acotar(_entero(t.rate_limit_kbps, base["rate_limit_kbps"]), TOPE_VELOCIDAD)
+    t.gap_min = _acotar(_entero(t.gap_min, base["gap_min"]), TOPE_PAUSA)
+    t.gap_max = max(t.gap_min, _acotar(_entero(t.gap_max, base["gap_max"]), TOPE_PAUSA))
+    t.video_sleep_min = _acotar(_entero(t.video_sleep_min, base["video_sleep_min"]), TOPE_PAUSA)
+    t.video_sleep_max = max(
+        t.video_sleep_min, _acotar(_entero(t.video_sleep_max, base["video_sleep_max"]), TOPE_PAUSA)
+    )
     return t
 
 

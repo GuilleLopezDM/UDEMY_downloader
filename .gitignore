@@ -18,3 +18,5 @@ video-dl-windows.zip
 .env
 *.env
 credentials.json
+.sentinel/
+server/upload.json

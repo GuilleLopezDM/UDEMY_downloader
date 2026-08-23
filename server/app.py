@@ -9,11 +9,13 @@ para el indicador de conexión, antes de tener token configurado. Por eso mismo
 no devuelve más que `{"ok": true}` — cualquier dato ahí queda sin proteger.
 """
 
+import contextlib
 import logging
 import os
 import secrets
+import sys
+import time
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,73 +25,82 @@ import throttle as throttle_cfg
 import upload_config
 import uploader
 from cookies import cookie_dir, summarize, sweep_orphans
-from downloader import JobManager
+from downloader import JobManager, explicar
+from redaccion import redact_url
 
 HERE = Path(__file__).resolve().parent
 TOKEN_FILE = HERE / ".token"
 DOWNLOAD_DIR = os.environ.get("VIDEO_DL_DIR", str(HERE.parent / "downloads"))
 
 
+def _preparar_salida() -> None:
+    """Fuerza UTF-8 en stdout/stderr.
+
+    En Windows, `sys.stdout.encoding` es la code page del sistema (cp1252 en un
+    equipo en español). A una consola real no molesta porque Python usa
+    `WriteConsoleW`, pero **redirigido a un archivo revienta**: el `⚠` del
+    banner no existe en cp1252 y el arranque muere con UnicodeEncodeError.
+    Y correr el servidor con la salida a un archivo es el caso normal.
+
+    Lo mismo vale para cualquier error de yt-dlp con un título en CJK o con los
+    homoglifos que mete `sanitize_filename` (`：`, `⧸`), que tampoco están.
+    """
+    for flujo in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            flujo.reconfigure(encoding="utf-8", errors="replace")
+
+
+_preparar_salida()
+
+
 def load_or_create_token() -> str:
+    tok = ""
     if TOKEN_FILE.exists():
         tok = TOKEN_FILE.read_text(encoding="utf-8").strip()
-        if tok:
-            return tok
-    tok = secrets.token_urlsafe(32)
-    TOKEN_FILE.write_text(tok + "\n", encoding="utf-8")
-    os.chmod(TOKEN_FILE, 0o600)
+    if not tok:
+        tok = secrets.token_urlsafe(32)
+        TOKEN_FILE.write_text(tok + "\n", encoding="utf-8")
+    # Fuera del `if`: el chmod se aplicaba sólo al crearlo, así que un `.token`
+    # que quedara en 644 —copiado, restaurado de un backup, generado por una
+    # versión vieja— se quedaba así para siempre. En Windows es casi no-op, pero
+    # ahí el archivo vive en el perfil del usuario.
+    with contextlib.suppress(OSError):
+        os.chmod(TOKEN_FILE, 0o600)
     return tok
 
 
 TOKEN = load_or_create_token()
-TUNING = throttle_cfg.load()
-SUBIDA = upload_config.load()
+# El resultado no se guarda: los módulos exponen `get()` y es de ahí de donde lo
+# leen `downloader` y los endpoints. Lo que importa acá es el efecto — dejar la
+# config del disco cargada antes de atender el primer request.
+throttle_cfg.load()
+upload_config.load()
 jobs = JobManager(DOWNLOAD_DIR)
 
 # Los jars de cookies se borran en un `finally`, que un SIGKILL —o cerrar la
 # ventana de la terminal— nunca ejecuta. Barrer al arrancar es la única red de
 # seguridad. Se incluye DOWNLOAD_DIR porque las versiones anteriores a este fix
 # los escribían ahí: quien actualice puede tener uno viejo con sesión viva.
+# El barrido respeta los jars de un servidor que siga vivo (ver `cookies.py`).
 ORPHANS_SWEPT = sweep_orphans(DOWNLOAD_DIR)
 
-# Parámetros de query que son credenciales. Los de CloudFront (Policy,
-# Signature, Key-Pair-Id) firman las URLs de los segmentos de Udemy: quien los
-# tenga puede bajar el video mientras no expiren.
-CLAVES_SENSIBLES = frozenset({
-    "policy", "signature", "sig", "key-pair-id", "token", "access_token",
-    "auth", "authorization", "expires", "x-amz-signature", "x-amz-credential",
-    "x-amz-security-token", "hdnts", "__hdnea__",
-})
-LARGO_MAXIMO_VALOR = 24
+# Descargas cortadas que quedaron a medias. NO se borran: yt-dlp las reanuda si
+# se vuelve a encolar la clase. Sólo se avisa, porque si no son bytes ocupando
+# disco que nadie sabe que están.
+EDAD_MINIMA_PARCIAL = 6 * 3600
 
 
-def redact_url(raw: str) -> str:
-    """URL apta para un log: conserva los nombres de parámetro, no los valores.
-
-    Los nombres ayudan a diagnosticar y no son secretos. Los valores sí pueden
-    serlo, así que las claves conocidas se omiten enteras y el resto se trunca
-    — una firma es siempre larga, un `v=Tr2Y9hBtTjE` de YouTube no.
-    """
+def parciales_viejos() -> list[str]:
     try:
-        partes = urlsplit(raw)
-    except ValueError:
-        return "(url ilegible)"
-    if not partes.query:
-        return raw
-
-    limpios = []
-    for par in partes.query.split("&"):
-        clave, sep, valor = par.partition("=")
-        if not sep:
-            limpios.append(clave)
-        elif clave.lower() in CLAVES_SENSIBLES:
-            limpios.append(f"{clave}=<omitido>")
-        elif len(valor) > LARGO_MAXIMO_VALOR:
-            limpios.append(f"{clave}={valor[:LARGO_MAXIMO_VALOR]}…<truncado>")
-        else:
-            limpios.append(par)
-
-    return urlunsplit((partes.scheme, partes.netloc, partes.path, "&".join(limpios), ""))
+        raiz = Path(jobs.download_dir)
+        ahora = time.time()
+        return sorted(
+            str(p.relative_to(raiz))
+            for p in raiz.rglob("*.part")
+            if ahora - p.stat().st_mtime > EDAD_MINIMA_PARCIAL
+        )
+    except OSError:
+        return []
 
 
 class _SilenciarPolling(logging.Filter):
@@ -110,20 +121,52 @@ class _SilenciarPolling(logging.Filter):
 
 logging.getLogger("uvicorn.access").addFilter(_SilenciarPolling())
 
-app = FastAPI(title="video-dl", docs_url=None, redoc_url=None)
+
+@contextlib.asynccontextmanager
+async def ciclo_de_vida(_app: FastAPI):
+    """Apaga la cola al cerrar el servidor.
+
+    Sin esto, Ctrl-C con un curso encolado no devolvía el prompt: el
+    ThreadPoolExecutor no es daemon y su `atexit` esperaba a que se drenaran los
+    200 trabajos pendientes, cada uno con su pausa de throttle.
+    """
+    yield
+    jobs.shutdown()
+
+
+app = FastAPI(title="video-dl", docs_url=None, redoc_url=None, lifespan=ciclo_de_vida)
 
 # Only the extension talks to this API. chrome-extension:// origins are not
 # matched by a wildcard list, so allow them by regex.
+#
+# El regex acepta CUALQUIER id de extensión: otra extensión instalada puede
+# llegar al servidor, y ahí quien frena es el token. Si querés cerrarlo del
+# todo, poné el id de tu extensión en VIDEO_DL_EXT_ID (se ve en
+# chrome://extensions con el modo desarrollador activado).
+_EXT_ID = os.environ.get("VIDEO_DL_EXT_ID", "").strip()
+_ORIGEN_REGEX = (
+    rf"^(chrome-extension|moz-extension)://{_EXT_ID}$"
+    if _EXT_ID
+    else r"^(chrome-extension|moz-extension)://.*$"
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^(chrome-extension|moz-extension)://.*$",
+    allow_origin_regex=_ORIGEN_REGEX,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
 
 def require_token(x_auth_token: str = Header(default="")) -> None:
-    if not secrets.compare_digest(x_auth_token, TOKEN):
+    # `compare_digest` lanza TypeError con strings no ASCII, y eso salía como
+    # 500 con traceback en vez de 401. Un header inválido es un rechazo, no un
+    # error del servidor.
+    try:
+        valido = secrets.compare_digest(x_auth_token, TOKEN)
+    except TypeError:
+        valido = False
+    if not valido:
         raise HTTPException(status_code=401, detail="Token inválido o ausente")
 
 
@@ -181,7 +224,11 @@ def health() -> dict:
 @app.get("/paths", dependencies=[Depends(require_token)])
 def paths() -> dict:
     """Rutas del servidor. Detrás del token: filtran el nombre del usuario."""
-    return {"download_dir": jobs.download_dir, "cookie_dir": cookie_dir()}
+    return {
+        "download_dir": jobs.download_dir,
+        "cookie_dir": cookie_dir(),
+        "espacio_libre_gb": jobs.espacio_libre_gb(),
+    }
 
 
 @app.post("/probe", dependencies=[Depends(require_token)])
@@ -191,20 +238,27 @@ def probe(req: ProbeRequest) -> dict:
     try:
         return jobs.probe(req.url, cookies)
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        # Sin `explicar`, el popup mostraba el volcado crudo de yt-dlp: la misma
+        # traducción que reciben los jobs fallidos tiene que llegar acá.
+        raise HTTPException(status_code=400, detail=explicar(str(e))) from e
 
 
 @app.post("/download", dependencies=[Depends(require_token)])
 def download(req: DownloadRequest) -> dict:
     cookies = [c.model_dump() for c in req.cookies] if req.cookies else None
     print(f"[download] {redact_url(req.url)}\n           cookies: {summarize(cookies)}", flush=True)
-    job = jobs.enqueue(
-        req.url,
-        cookies=cookies,
-        quality=req.quality,
-        subtitles=req.subtitles,
-        audio_only=req.audio_only,
-    )
+    try:
+        job = jobs.enqueue(
+            req.url,
+            cookies=cookies,
+            quality=req.quality,
+            subtitles=req.subtitles,
+            audio_only=req.audio_only,
+        )
+    except Exception as e:  # noqa: BLE001
+        # Encolar puede fallar antes de crear el job (por ejemplo, si el
+        # directorio de cookies no se puede preparar). Sin esto salía como 500.
+        raise HTTPException(status_code=400, detail=explicar(str(e))) from e
     return job.public()
 
 
@@ -222,7 +276,7 @@ def download_playlist(req: DownloadRequest) -> dict:
             audio_only=req.audio_only,
         )
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(status_code=400, detail=explicar(str(e))) from e
     print(f"           encoladas {resultado['count']} clases", flush=True)
     return resultado
 
@@ -238,6 +292,12 @@ def get_job(job_id: str) -> dict:
     if not job:
         raise HTTPException(status_code=404, detail="Job inexistente")
     return job.public()
+
+
+@app.post("/jobs/cancel-all", dependencies=[Depends(require_token)])
+def cancel_all_jobs() -> dict:
+    """Cancela todo lo pendiente de una. Un curso son 200 clics, si no."""
+    return {"cancelled": jobs.cancel_all()}
 
 
 @app.post("/jobs/{job_id}/cancel", dependencies=[Depends(require_token)])
@@ -314,6 +374,9 @@ if __name__ == "__main__":
     banner("=" * 62)
     banner("  video-dl server")
     banner(f"  Descargas en: {jobs.download_dir}")
+    _libre = jobs.espacio_libre_gb()
+    if _libre is not None:
+        banner(f"  Espacio libre: {_libre} GB")
     banner(f"  Token (pegalo en la extensión): {TOKEN}")
     _t = throttle_cfg.get()
     _limit = f"{_t.rate_limit_kbps} KB/s" if _t.rate_limit_kbps else "sin límite"
@@ -322,6 +385,8 @@ if __name__ == "__main__":
             if _t.video_sleep_max else "")
     banner(f"  Ritmo: {_t.preset} ({_limit}, {_gap}{_vid})")
     banner(f"  Cookies temporales en: {cookie_dir()}")
+    if _EXT_ID:
+        banner(f"  CORS acotado a la extensión {_EXT_ID}")
     _s = upload_config.get()
     if _s.activo:
         _borra = " y borra el local" if _s.delete_after else ""
@@ -334,6 +399,12 @@ if __name__ == "__main__":
         banner(f"  ⚠ Se borraron {len(ORPHANS_SWEPT)} archivo(s) de cookies de una corrida previa:")
         for stale in ORPHANS_SWEPT:
             banner(f"      {stale}")
+    _parciales = parciales_viejos()
+    if _parciales:
+        banner(f"  ⚠ {len(_parciales)} descarga(s) a medias, de más de 6 h. NO se borran:")
+        banner("     reencolá esa clase y yt-dlp la reanuda, o borrá el .part a mano.")
+        for parcial in _parciales[:5]:
+            banner(f"      {parcial}")
     banner("=" * 62)
     # Por defecto sólo loopback. `VIDEO_DL_HOST` permite exponerlo en una IP
     # concreta —típicamente la de Tailscale— para depurar desde otra máquina.
@@ -342,4 +413,5 @@ if __name__ == "__main__":
     host = os.environ.get("VIDEO_DL_HOST", "127.0.0.1")
     if host != "127.0.0.1":
         banner(f"  ⚠ Escuchando en {host} — accesible desde otras máquinas de esa red")
+        banner("     El tráfico va sin TLS: el token y tus cookies viajan en claro.")
     uvicorn.run(app, host=host, port=int(os.environ.get("VIDEO_DL_PORT", 3210)))

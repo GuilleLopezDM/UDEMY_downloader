@@ -1,22 +1,34 @@
 """Conversion of browser cookies (sent by the extension) to a Netscape cookie file.
 
 The file is what yt-dlp's --cookies option expects. It carries a live session, so
-three things matter and are enforced here:
+tres cosas importan y se garantizan acá:
 
 1. Mode 0600, inside a private 0700 directory — never in `downloads/`, which is a
    folder the user opens, syncs and shares.
 2. Deleted as soon as the job that uses it finishes.
-3. Swept at startup, because point 2 lives in a `finally` and a SIGKILL (or closing
-   the terminal window) never runs it.
+3. Barridos al arrancar, porque el punto 2 vive en un `finally` y un SIGKILL (o
+   cerrar la ventana de la terminal) nunca lo ejecuta.
+
+El punto 3 tiene una trampa que costó entender: barrer *todo* lo que haya en el
+directorio significa que arrancar una segunda instancia del servidor —aunque
+falle acto seguido por el puerto ocupado— le borra los jars a la instancia que
+está bajando un curso. Las clases siguientes fallan con "Hace falta sesión
+iniciada" y no hay ninguna pista de por qué. Por eso el nombre del archivo lleva
+el PID del proceso que lo creó, y solo se barren los de procesos que ya murieron.
 """
 
 import getpass
 import os
+import re
+import sys
 import tempfile
 from pathlib import Path
 from typing import Iterable, Mapping
 
 COOKIE_FILE_GLOB = "cookies-*.txt"
+
+# `cookies-<pid>-<aleatorio>.txt`
+_PID_EN_NOMBRE = re.compile(r"^cookies-(?P<pid>\d+)-")
 
 
 def cookie_dir() -> str:
@@ -26,8 +38,21 @@ def cookie_dir() -> str:
     restarts, but on a shared machine `/tmp` is hostile: another user could get
     there first. So the name carries the username and we refuse anything we do
     not own, or any symlink pointing elsewhere.
+
+    En Windows `mkdir(mode=)` y `chmod` son casi no-op, pero ahí el temp del
+    usuario (`%LOCALAPPDATA%\\Temp`) ya trae una ACL heredada que solo concede al
+    propio usuario, así que la propiedad que se busca se cumple igual.
     """
-    path = Path(tempfile.gettempdir()) / f"video-dl-cookies-{getpass.getuser()}"
+    # `getuser()` puede fallar si no hay ninguna de las variables de entorno que
+    # consulta; un directorio compartido es mejor que no arrancar.
+    try:
+        usuario = getpass.getuser()
+    except Exception:  # noqa: BLE001
+        usuario = "desconocido"
+    # El nombre entra en una ruta: un usuario con espacios ("Guillermo Lopez")
+    # funciona igual, pero se normaliza para no depender de eso.
+    usuario = re.sub(r"[^A-Za-z0-9._-]", "_", usuario)
+    path = Path(tempfile.gettempdir()) / f"video-dl-cookies-{usuario}"
 
     if path.is_symlink():
         raise RuntimeError(f"{path} es un symlink; no se escriben credenciales ahí")
@@ -45,7 +70,9 @@ def cookie_dir() -> str:
 
 def write_netscape_cookiefile(cookies: Iterable[Mapping]) -> str:
     """Write `cookies` to a Netscape-format file and return its path."""
-    fd, path = tempfile.mkstemp(prefix="cookies-", suffix=".txt", dir=cookie_dir())
+    fd, path = tempfile.mkstemp(
+        prefix=f"cookies-{os.getpid()}-", suffix=".txt", dir=cookie_dir()
+    )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write("# Netscape HTTP Cookie File\n")
@@ -82,21 +109,72 @@ def write_netscape_cookiefile(cookies: Iterable[Mapping]) -> str:
 
 
 def discard(path: str | None) -> None:
-    """Delete a cookie file, ignoring the case where it is already gone."""
+    """Borra un jar de cookies. Avisa si no puede, en vez de callarse.
+
+    El README promete que el archivo se borra apenas termina el job. Tragarse el
+    error dejaba esa promesa sin cumplir y sin ninguna señal: la sesión seguía en
+    disco y nadie se enteraba.
+    """
     if not path:
         return
     try:
         os.unlink(path)
-    except OSError:
+    except FileNotFoundError:
         pass
+    except OSError as e:
+        print(
+            f"[cookies]  NO se pudo borrar {path}: {e} — tiene una sesión viva adentro",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _proceso_vivo(pid: int) -> bool:
+    """¿Sigue corriendo ese PID?
+
+    Se usa para no barrer los jars de otra instancia del servidor. Ante la duda
+    devuelve True: dejar un archivo de más es molesto, borrarle las credenciales
+    a una descarga en curso la rompe sin dejar rastro.
+    """
+    if pid <= 0:
+        return True
+    if os.name == "nt":
+        import ctypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            codigo = ctypes.c_ulong()
+            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(codigo))
+            return bool(ok) and codigo.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Existe pero es de otro usuario.
+        return True
+    except OSError:
+        return True
+    return True
 
 
 def sweep_orphans(*extra_dirs: str) -> list[str]:
-    """Delete cookie jars left behind by a previous run. Returns what it removed.
+    """Borra los jars que dejó una corrida anterior. Devuelve lo que sacó.
 
-    Called at startup. `extra_dirs` covers the old location (`downloads/`), where
-    versions before this fix wrote the jars: a user upgrading may already have an
-    orphan sitting there with a live session in it.
+    Se llama al arrancar. `extra_dirs` cubre la ubicación vieja (`downloads/`),
+    donde las versiones anteriores a este fix escribían los jars: quien actualice
+    puede tener uno ahí con una sesión viva.
+
+    **No toca los jars de un proceso que sigue vivo.** El nombre lleva el PID de
+    quien lo creó; si ese proceso está corriendo, el archivo es suyo y está en
+    uso. Los nombres sin PID son de versiones viejas y sí se barren.
     """
     removed: list[str] = []
     directories = [cookie_dir(), *extra_dirs]
@@ -106,6 +184,9 @@ def sweep_orphans(*extra_dirs: str) -> list[str]:
         except OSError:
             continue
         for stale in candidates:
+            m = _PID_EN_NOMBRE.match(stale.name)
+            if m and _proceso_vivo(int(m["pid"])):
+                continue
             try:
                 stale.unlink()
                 removed.append(str(stale))

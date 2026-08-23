@@ -29,34 +29,39 @@ _UDEMY_LECTURE = re.compile(
 # /course/<slug>[/...] sin lecture → el curso entero
 _UDEMY_COURSE = re.compile(
     r"^(?P<base>https?://(?:[^/]+\.)?udemy\.com)/course/(?P<slug>[^/?#]+)"
+    r"(?P<resto>[/?#].*)?$"
 )
 
+# Lo que viene después de `/learn/` cuando la URL apunta a UNA cosa concreta del
+# curso que no es una clase de video. `_UDEMY_COURSE` matchea cualquier
+# `/course/<slug>/...`, así que sin esta guarda una URL de quiz se degradaba en
+# silencio al curso ENTERO: pegabas el link de un examen y te encolaba 200
+# descargas. `_UDEMY_LECTURE` no salva el caso porque exige `/learn/lecture/<n>`.
+_UDEMY_NO_ES_CURSO = re.compile(r"^/learn/(?!lecture/\d)", re.IGNORECASE)
 
-_ID_DE_CLASE = re.compile(r"/lecture/(?P<id>\d+)")
 
+def motivo_no_soportado(url: str) -> str | None:
+    """Mensaje explicando por qué esa URL no da un video, o None si sí puede darlo.
 
-def preservar_portal(url_curso: str, url_clase: str) -> str:
-    """Rearma la URL de una clase sobre el portal y el slug del curso original.
-
-    No alcanza con cambiar el host. El extractor de cursos de yt-dlp arma cada
-    clase como `www.udemy.com/<slug>/learn/v4/t/lecture/<id>` (línea 458 de
-    `yt_dlp/extractor/udemy.py`): host equivocado **y** path sin `/course/`.
-
-    Y el path importa porque el extractor de clase saca el `course_id`
-    **leyendo esa página** (`_real_extract` → `_download_webpage` →
-    `_extract_course_info`). Si la página no existe, se queda sin `course_id`
-    y la llamada a la API devuelve 403.
-
-    Así que se reconstruye con la forma que sí demostró funcionar en este
-    portal: `https://<portal>/course/<slug>/#/lecture/<id>`.
-
-    Si algo no se puede parsear, devuelve la URL original en vez de inventar.
+    Vale la pena adelantarse a yt-dlp. Una URL de quiz no la traduce `normalize`,
+    pero igual matchea el `_VALID_URL` de `UdemyCourseIE` —que acepta cualquier
+    `udemy.com/<algo>`—, así que yt-dlp se queda con la palabra literal `course`
+    como slug, pide una página que no existe y devuelve **403**: exactamente el
+    error indescifrable que motivó este módulo.
     """
-    m_id = _ID_DE_CLASE.search(url_clase)
-    m_curso = _UDEMY_COURSE.match(url_curso)
-    if not m_id or not m_curso:
-        return url_clase
-    return f"{m_curso['base']}/course/{m_curso['slug']}/#/lecture/{m_id['id']}"
+    m = _UDEMY_COURSE.match(url)
+    if not m:
+        return None
+    resto = m["resto"] or ""
+    if not _UDEMY_NO_ES_CURSO.match(resto):
+        return None
+    partes = [p for p in resto.split("/") if p]
+    seccion = partes[1] if len(partes) > 1 else "esa sección"
+    return (
+        f"Esa URL apunta a «{seccion}» dentro del curso, y ahí no hay ningún video. "
+        "Pegá la URL de una clase (.../learn/lecture/...) o la del curso "
+        f"(https://www.udemy.com/course/{m['slug']}/) y usá «Analizar»."
+    )
 
 
 def normalize(url: str) -> str:
@@ -68,6 +73,12 @@ def normalize(url: str) -> str:
 
     m = _UDEMY_COURSE.match(url)
     if m:
+        resto = m["resto"] or ""
+        if _UDEMY_NO_ES_CURSO.match(resto):
+            # Quiz, práctica, tarea, artículo: no es el curso. Se devuelve tal
+            # cual para que yt-dlp falle con "Unsupported URL" —un error honesto—
+            # en vez de encolar el curso completo que nadie pidió.
+            return url
         # UdemyCourseIE espera el slug como primer segmento, sin `/course/`.
         return f"{m['base']}/{m['slug']}/"
 

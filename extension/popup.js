@@ -1,4 +1,4 @@
-import { api, collectCookies } from "./api.js";
+import { api, collectCookies, ErrorDeToken } from "./api.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -8,48 +8,125 @@ const $ = (id) => document.getElementById(id);
 // la pestaña y se puede pegar otra encima.
 const urlActual = () => $("url").value.trim();
 
+const EN_WINDOWS = /Windows/i.test(navigator.userAgent);
+const COMO_LEVANTARLO = EN_WINDOWS
+  ? "powershell -ExecutionPolicy Bypass -File .\\run.ps1"
+  : "./run.sh";
+
 let pollTimer = null;
+
+function pintarPin(fijada) {
+  const b = $("pin");
+  b.textContent = fijada ? "Fijada ✓" : "Fijar";
+  b.className = fijada ? "secondary pin activa" : "secondary pin";
+  b.title = fijada
+    ? "Quitar: al abrir el popup vuelve a usarse la URL de la pestaña"
+    : "Fijar esta URL para las próximas veces";
+}
+
+async function onPin() {
+  const { pinnedUrl } = await chrome.storage.local.get({ pinnedUrl: "" });
+  if (pinnedUrl) {
+    await chrome.storage.local.set({ pinnedUrl: "" });
+    pintarPin(false);
+    showMessage("URL desfijada. La próxima vez se usa la de la pestaña.", "info");
+    return;
+  }
+  const u = urlActual();
+  if (!/^https?:/.test(u)) {
+    showMessage("Escribí una URL válida antes de fijarla.", "error");
+    return;
+  }
+  await chrome.storage.local.set({ pinnedUrl: u });
+  pintarPin(true);
+  showMessage("URL fijada. Se va a cargar sola al abrir el popup.", "info");
+}
+
+// La URL con la que se hizo el último Analizar. El botón de curso completo sólo
+// vale para ESA: antes sólo se escondía cuando la URL dejaba de ser válida, así
+// que pegar otro curso encima dejaba el botón con el conteo del anterior y
+// encolaba el curso equivocado sin avisar.
+let urlAnalizada = null;
+
+function ocultarAnalisis() {
+  urlAnalizada = null;
+  $("download-course").className = "primary full hidden";
+  $("probe-result").className = "probe hidden";
+  $("probe-result").textContent = "";
+}
 
 function actualizarBotones() {
   const usable = /^https?:/.test(urlActual());
   $("download").disabled = !usable;
   $("probe").disabled = !usable;
-  // El botón de curso completo depende de un análisis previo: si cambia la URL,
-  // lo que decía deja de corresponder.
-  if (!usable) $("download-course").className = "primary full hidden";
+  if (urlAnalizada !== null && urlActual() !== urlAnalizada) ocultarAnalisis();
+  if (!usable) ocultarAnalisis();
 }
 
 async function init() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  $("url").value = tab?.url || "";
-  actualizarBotones();
+  // Los listeners se registran ANTES de cualquier await: si `chrome.tabs.query`
+  // o `storage` fallan, el popup queda con la UI viva y un mensaje de error, en
+  // vez de un formulario mudo donde ningún botón hace nada.
   $("url").addEventListener("input", actualizarBotones);
-
+  $("pin").addEventListener("click", onPin);
   $("probe").addEventListener("click", onProbe);
   $("download").addEventListener("click", onDownload);
   $("download-course").addEventListener("click", onDownloadCourse);
   $("clear").addEventListener("click", onClear);
+  $("cancel-all").addEventListener("click", onCancelAll);
   $("options").addEventListener("click", (e) => {
     e.preventDefault();
     chrome.runtime.openOptionsPage();
   });
 
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    // Una URL fijada gana sobre la de la pestaña: el caso de uso es un curso de
+    // Udemy, y Udemy redirige la página del curso a la última clase vista, así
+    // que la pestaña casi nunca tiene la URL que uno quiere encolar.
+    const { pinnedUrl } = await chrome.storage.local.get({ pinnedUrl: "" });
+    $("url").value = pinnedUrl || tab?.url || "";
+    pintarPin(Boolean(pinnedUrl));
+  } catch (e) {
+    showMessage(`No se pudo leer la pestaña actual: ${e.message}`, "error");
+  }
+  actualizarBotones();
+
   await checkHealth();
   await refreshJobs();
+  await mostrarRuta();
   pollTimer = setInterval(refreshJobs, 1000);
 }
 
 window.addEventListener("unload", () => clearInterval(pollTimer));
 
+function marcarEstado(online, detalle) {
+  const el = $("status");
+  el.className = online ? "dot online" : "dot offline";
+  el.title = detalle;
+  el.setAttribute("aria-label", detalle);
+}
+
 async function checkHealth() {
   try {
     await api.health();
-    $("status").className = "dot online";
-    $("status").title = "Servidor conectado";
+    marcarEstado(true, "Servidor conectado");
   } catch {
-    $("status").className = "dot offline";
-    $("status").title = "Servidor no disponible";
-    showMessage("El servidor local no responde. Levantalo con ./run.sh", "error");
+    marcarEstado(false, "Servidor no disponible");
+    showMessage(`El servidor local no responde. Levantalo con: ${COMO_LEVANTARLO}`, "error");
+  }
+}
+
+// La carpeta de descargas vive detrás del token (filtra el nombre del usuario),
+// así que se pide aparte y en silencio: si falla, simplemente no se muestra.
+async function mostrarRuta() {
+  try {
+    const { download_dir, espacio_libre_gb } = await api.paths();
+    const libre = espacio_libre_gb != null ? ` · ${espacio_libre_gb} GB libres` : "";
+    $("ruta").textContent = `${download_dir}${libre}`;
+    $("ruta").title = `${download_dir}${libre}`;
+  } catch {
+    $("ruta").textContent = "";
   }
 }
 
@@ -69,12 +146,12 @@ function hideMessage() {
 // cookies mientras el check seguía tildado, así que un fallo de permisos era
 // indistinguible de un sitio que no las necesita. En Udemy eso significa un 403
 // sin ninguna pista de por qué.
-async function cookiesIfWanted() {
+async function cookiesIfWanted(url = urlActual()) {
   if (!$("cookies").checked) return null;
 
   let cookies;
   try {
-    cookies = await collectCookies(urlActual());
+    cookies = await collectCookies(url);
   } catch (e) {
     throw new Error(`No se pudieron leer las cookies: ${e.message}`);
   }
@@ -88,15 +165,25 @@ async function cookiesIfWanted() {
   return cookies;
 }
 
+function opcionesActuales() {
+  return {
+    quality: $("quality").value,
+    subtitles: $("subtitles").checked,
+    audio_only: $("audio").checked,
+  };
+}
+
 async function onProbe() {
   hideMessage();
   $("probe").disabled = true;
   $("probe").textContent = "Analizando…";
+  const url = urlActual();
   try {
-    const info = await api.probe(urlActual(), await cookiesIfWanted());
+    const info = await api.probe(url, await cookiesIfWanted(url));
     const box = $("probe-result");
     box.className = "probe";
     const boton = $("download-course");
+    urlAnalizada = url;
     if (info.kind === "playlist") {
       box.textContent = `Curso: ${info.title} — ${info.count} clases`;
       // Recién acá sabemos que hay varias clases, así que el botón de curso
@@ -123,9 +210,7 @@ async function onDownload() {
     await api.download({
       url: urlActual(),
       cookies: await cookiesIfWanted(),
-      quality: $("quality").value,
-      subtitles: $("subtitles").checked,
-      audio_only: $("audio").checked,
+      ...opcionesActuales(),
     });
     showMessage("Descarga encolada.", "info");
     await refreshJobs();
@@ -148,13 +233,15 @@ async function onDownloadCourse() {
     const r = await api.downloadPlaylist({
       url: urlActual(),
       cookies: await cookiesIfWanted(),
-      quality: $("quality").value,
-      subtitles: $("subtitles").checked,
-      audio_only: $("audio").checked,
+      ...opcionesActuales(),
     });
-    const omitidas = r.skipped ? ` (${r.skipped} omitidas sin URL)` : "";
+    const omitidas = r.skipped ? ` (${r.skipped} omitidas sin URL usable)` : "";
     const destino = r.folder ? ` → carpeta "${r.folder}"` : "";
-    showMessage(`${r.count} clases en cola${omitidas}${destino}. Se bajan de a una.`, "info");
+    const libre = r.espacio_libre_gb != null ? ` Quedan ${r.espacio_libre_gb} GB libres.` : "";
+    showMessage(
+      `${r.count} clases en cola${omitidas}${destino}. Se bajan de a una.${libre}`,
+      "info",
+    );
     await refreshJobs();
   } catch (e) {
     showMessage(e.message, "error");
@@ -173,6 +260,16 @@ async function onClear() {
   }
 }
 
+async function onCancelAll() {
+  try {
+    const { cancelled } = await api.cancelAll();
+    showMessage(`${cancelled} trabajo(s) cancelado(s).`, "info");
+    await refreshJobs();
+  } catch (e) {
+    showMessage(e.message, "error");
+  }
+}
+
 const LABELS = {
   queued: "En cola",
   waiting: "Esperando turno",
@@ -180,6 +277,9 @@ const LABELS = {
   postprocessing: "Procesando",
   uploading: "Subiendo",
   done: "Listo",
+  // No es "Listo": no se bajó nada ahora. El registro de descargados dice que
+  // ya la tenías, y si borraste el archivo igual la saltea.
+  skipped: "Ya estaba descargada",
   error: "Error",
   // Se distingue de "Error" a propósito: el video está bajado y en disco, lo
   // único que falló es la subida. Decir "Error" a secas haría pensar que no
@@ -188,92 +288,212 @@ const LABELS = {
   cancelled: "Cancelado",
 };
 
+const ACTIVOS = ["queued", "waiting", "running", "postprocessing", "uploading"];
+const REINTENTABLES = ["error", "upload_error", "cancelled", "skipped"];
+
+// Filas vivas, por id de job.
+//
+// La lista se repintaba entera cada segundo (`list.textContent = ""`), y con 200
+// clases eso hacía tres cosas: el scroll volvía al tope —imposible mirar la
+// clase 150—, el foco de teclado caía a <body>, y un click cuyo mousedown y
+// mouseup caían a los dos lados de un repintado no llegaba a emitirse nunca, así
+// que Cancelar fallaba en silencio. Reconciliando, el <li> es el mismo nodo
+// mientras el job exista.
+const filas = new Map();
+
+function crearFila(job) {
+  const li = document.createElement("li");
+  li.dataset.id = job.id;
+
+  const title = document.createElement("div");
+  title.className = "job-title";
+  const num = document.createElement("span");
+  num.className = "job-num";
+  const texto = document.createTextNode("");
+  title.append(num, texto);
+
+  const bar = document.createElement("div");
+  bar.className = "bar";
+  bar.setAttribute("role", "progressbar");
+  bar.setAttribute("aria-valuemin", "0");
+  bar.setAttribute("aria-valuemax", "100");
+  const fill = document.createElement("span");
+  bar.appendChild(fill);
+
+  const meta = document.createElement("div");
+  meta.className = "job-meta";
+  const left = document.createElement("span");
+  const right = document.createElement("span");
+  meta.append(left, right);
+
+  const err = document.createElement("div");
+  err.className = "job-error hidden";
+
+  const acciones = document.createElement("div");
+  acciones.className = "job-actions";
+  const cancelar = document.createElement("button");
+  cancelar.className = "link";
+  cancelar.textContent = "Cancelar";
+  cancelar.addEventListener("click", async () => {
+    try {
+      await api.cancel(li.dataset.id);
+      await refreshJobs();
+    } catch (e) {
+      showMessage(e.message, "error");
+    }
+  });
+  const reintentar = document.createElement("button");
+  reintentar.className = "link";
+  reintentar.textContent = "Reintentar";
+  reintentar.title = "Vuelve a encolarla con las opciones que estén elegidas ahora";
+  reintentar.addEventListener("click", async () => {
+    const u = li.dataset.url;
+    try {
+      await api.download({ url: u, cookies: await cookiesIfWanted(u), ...opcionesActuales() });
+      showMessage("Reencolada.", "info");
+      await refreshJobs();
+    } catch (e) {
+      showMessage(e.message, "error");
+    }
+  });
+  const copiar = document.createElement("button");
+  copiar.className = "link";
+  copiar.textContent = "Copiar URL";
+  copiar.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(li.dataset.url || "");
+      showMessage("URL copiada.", "info");
+    } catch {
+      showMessage("El navegador no dejó copiar al portapapeles.", "error");
+    }
+  });
+  acciones.append(cancelar, reintentar, copiar);
+
+  li.append(title, bar, meta, err, acciones);
+  li._partes = { num, texto, bar, fill, left, right, err, cancelar, reintentar, copiar, acciones };
+  return li;
+}
+
+// Sólo se toca lo que cambió: asignar el mismo textContent no dispara relayout,
+// pero además así el diff queda explícito y no hay nodos nuevos por tick.
+function poner(nodo, prop, valor) {
+  if (nodo[prop] !== valor) nodo[prop] = valor;
+}
+
+function pintarFila(li, job) {
+  const p = li._partes;
+  li.dataset.url = job.url || "";
+
+  if (job.position) {
+    poner(p.num, "textContent", `${job.position}/${job.total}`);
+    poner(p.num, "className", "job-num");
+  } else {
+    poner(p.num, "textContent", "");
+    poner(p.num, "className", "job-num hidden");
+  }
+  poner(p.texto, "nodeValue", job.title || job.url || "");
+  li.title = job.url || "";
+
+  const fallo = job.status === "error" || job.status === "upload_error";
+  const clase =
+    job.status === "done" ? "done" : job.status === "skipped" ? "skipped" : fallo ? "error" : "";
+  const pct = job.status === "done" ? 100 : Number(job.percent) || 0;
+  poner(p.bar, "className", `bar ${clase}`.trim());
+  p.bar.setAttribute("aria-valuenow", String(Math.round(pct)));
+  p.bar.setAttribute("aria-label", `${LABELS[job.status] || job.status}: ${Math.round(pct)}%`);
+  if (p.fill.style.width !== `${pct}%`) p.fill.style.width = `${pct}%`;
+
+  poner(p.left, "textContent", LABELS[job.status] || job.status);
+  let derecha = "";
+  if (job.status === "running") {
+    derecha = [job.speed, job.eta != null ? `${job.eta}s` : null].filter(Boolean).join(" · ");
+  } else if (job.status === "waiting" && job.wait_seconds != null) {
+    derecha = `arranca en ${job.wait_seconds}s`;
+  } else if (job.status === "uploading") {
+    derecha = `${job.percent}%`;
+  }
+  poner(p.right, "textContent", derecha);
+
+  poner(p.err, "textContent", job.error || "");
+  poner(p.err, "className", job.error ? "job-error" : "job-error hidden");
+
+  const activo = ACTIVOS.includes(job.status);
+  poner(p.cancelar, "className", activo ? "link" : "link hidden");
+  const reintentable = REINTENTABLES.includes(job.status);
+  poner(p.reintentar, "className", reintentable ? "link" : "link hidden");
+  poner(p.copiar, "className", reintentable ? "link" : "link hidden");
+  poner(p.acciones, "className", activo || reintentable ? "job-actions" : "job-actions hidden");
+}
+
+function pintarVacio(list, texto) {
+  let li = list.querySelector("li.vacio");
+  if (!li) {
+    li = document.createElement("li");
+    li.className = "vacio job-meta";
+    list.appendChild(li);
+  }
+  poner(li, "textContent", texto);
+}
+
 async function refreshJobs() {
   let jobs;
   try {
     ({ jobs } = await api.jobs());
-    $("status").className = "dot online";
-  } catch {
-    $("status").className = "dot offline";
+    marcarEstado(true, "Servidor conectado");
+  } catch (e) {
+    // Un token mal configurado NO es un servidor caído: /health no pide token,
+    // así que el punto quedaba verde y la lista vacía, sin ninguna pista.
+    if (e instanceof ErrorDeToken) {
+      marcarEstado(false, "Token inválido");
+      showMessage(e.message, "error");
+    } else {
+      marcarEstado(false, "Servidor no disponible");
+    }
     return;
   }
 
   const list = $("job-list");
-  list.textContent = "";
+
   if (!jobs.length) {
-    const li = document.createElement("li");
-    li.className = "job-meta";
-    li.textContent = "Todavía no hay descargas.";
-    list.appendChild(li);
+    for (const [id, li] of filas) {
+      li.remove();
+      filas.delete(id);
+    }
+    pintarVacio(list, "Todavía no hay descargas.");
+    $("cancel-all").className = "link hidden";
     return;
   }
+  list.querySelector("li.vacio")?.remove();
 
   // En orden de encolado, NO al revés: para un curso ese es el orden de las
   // clases. Mostrarlo invertido dejaba la clase 40 arriba y la 1 abajo.
+  const vistos = new Set();
+  let anterior = null;
   for (const job of jobs) {
-    const li = document.createElement("li");
-
-    const title = document.createElement("div");
-    title.className = "job-title";
-    if (job.position) {
-      const num = document.createElement("span");
-      num.className = "job-num";
-      num.textContent = `${job.position}/${job.total}`;
-      title.appendChild(num);
+    vistos.add(job.id);
+    let li = filas.get(job.id);
+    if (!li) {
+      li = crearFila(job);
+      filas.set(job.id, li);
     }
-    title.appendChild(document.createTextNode(job.title || job.url));
-    title.title = job.url;
-    li.appendChild(title);
-
-    const bar = document.createElement("div");
-    const fallo = job.status === "error" || job.status === "upload_error";
-    bar.className = `bar ${job.status === "done" ? "done" : fallo ? "error" : ""}`;
-    const fill = document.createElement("span");
-    fill.style.width = `${job.status === "done" ? 100 : job.percent}%`;
-    bar.appendChild(fill);
-    li.appendChild(bar);
-
-    const meta = document.createElement("div");
-    meta.className = "job-meta";
-    const left = document.createElement("span");
-    left.textContent = LABELS[job.status] || job.status;
-    const right = document.createElement("span");
-    if (job.status === "running") {
-      right.textContent = [job.speed, job.eta != null ? `${job.eta}s` : null]
-        .filter(Boolean)
-        .join(" · ");
-    } else if (job.status === "waiting" && job.wait_seconds != null) {
-      right.textContent = `arranca en ${job.wait_seconds}s`;
-    } else if (job.status === "uploading") {
-      right.textContent = `${job.percent}%`;
-    }
-    meta.append(left, right);
-    li.appendChild(meta);
-
-    if (job.error) {
-      const err = document.createElement("div");
-      err.className = "job-error";
-      err.textContent = job.error;
-      li.appendChild(err);
-    }
-
-    if (["queued", "waiting", "running", "postprocessing", "uploading"].includes(job.status)) {
-      const cancel = document.createElement("button");
-      cancel.className = "link";
-      cancel.textContent = "Cancelar";
-      cancel.addEventListener("click", async () => {
-        try {
-          await api.cancel(job.id);
-          await refreshJobs();
-        } catch (e) {
-          showMessage(e.message, "error");
-        }
-      });
-      li.appendChild(cancel);
-    }
-
-    list.appendChild(li);
+    // Reubica sólo si hace falta: insertBefore con el nodo ya en posición es
+    // un no-op para el navegador, pero mover un nodo enfocado le saca el foco.
+    const esperado = anterior ? anterior.nextSibling : list.firstChild;
+    if (li !== esperado) list.insertBefore(li, esperado);
+    pintarFila(li, job);
+    anterior = li;
   }
+
+  for (const [id, li] of filas) {
+    if (!vistos.has(id)) {
+      li.remove();
+      filas.delete(id);
+    }
+  }
+
+  const activos = jobs.filter((j) => ACTIVOS.includes(j.status)).length;
+  $("cancel-all").className = activos ? "link" : "link hidden";
+  $("cancel-all").textContent = `Cancelar todo (${activos})`;
 }
 
 init();

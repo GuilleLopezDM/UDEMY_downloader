@@ -89,8 +89,14 @@ Abrí el video, hacé clic en el ícono y:
 - **Usar cookies del navegador** — manda tus cookies del sitio al servidor.
   **Imprescindible en Udemy**: sin sesión iniciada, el curso no se puede leer
 
-Los archivos van a `downloads/`. Se cambia con la variable `VIDEO_DL_DIR`.
-El puerto se cambia con `VIDEO_DL_PORT`.
+### Variables de entorno
+
+| Variable | Para qué |
+|---|---|
+| `VIDEO_DL_DIR` | Dónde van los archivos. Por defecto `downloads/` |
+| `VIDEO_DL_PORT` | Puerto del servidor. Por defecto `3210` |
+| `VIDEO_DL_HOST` | IP donde escucha. Por defecto `127.0.0.1`. **Cambiarla expone el servidor**: el tráfico va sin TLS, así que el token y tus cookies viajan en claro. Pensada para una IP de Tailscale, nunca `0.0.0.0` |
+| `VIDEO_DL_EXT_ID` | Acota CORS a **una** extensión. Sin esto, cualquier extensión instalada puede hablarle al servidor y el único freno es el token. El id se ve en `chrome://extensions` con el modo desarrollador |
 
 ## Udemy
 
@@ -146,12 +152,15 @@ salteándose el freno.
 
 Cuánto tarda, con 40 clases:
 
-| Perfil | Sólo las pausas |
-|---|---|
-| Normal (5-15 s) | ~7 min |
-| Cauteloso (20-60 s) | ~27 min |
+| Perfil | Entre trabajos | Entre videos | Sólo las pausas |
+|---|---|---|---|
+| Normal | 5-15 s | 3-8 s | ~11 min |
+| Cauteloso | 20-60 s | 10-30 s | ~40 min |
+| Paranoico | 60-180 s | 30-90 s | ~120 min |
 
-Más el tiempo de descarga real de cada video.
+Más el tiempo de descarga real de cada video. **Las dos pausas se suman**: la de
+"entre videos" también se aplica con el fan-out, porque yt-dlp la respeta dentro
+de cada trabajo.
 
 ### Cortar y retomar
 
@@ -159,10 +168,40 @@ Lo ya descargado queda registrado en `downloads/.video-dl-descargados.txt`. Si e
 servidor se reinicia a mitad de un curso, **volvé a encolarlo**: baja sólo lo que
 falta. Los jobs viven en memoria y no sobreviven a un reinicio, pero el registro sí.
 
+Las clases que ya estaban aparecen como **"Ya estaba descargada"**, no como
+"Listo": no se bajó nada ahora, y si borraste el archivo el registro igual la
+saltea. Esas clases pagan una pausa corta (2-5 s) en vez de la pausa completa del
+perfil, así que reencolar un curso casi entero tarda minutos y no horas.
+
+> Aun así **cada clase salteada hace un request** al sitio antes de descubrir que
+> ya la tenés: el atajo interno de yt-dlp compara un id que en Udemy no coincide
+> con el que guarda el registro. Por eso la pausa corta no es cero.
+
 > **Ojo:** si borrás un video ya descargado y reencolás el curso, **no vuelve a
 > bajarlo** — para el registro ya lo tenés. Para forzar que lo baje de nuevo,
 > borrá su línea de `.video-dl-descargados.txt`, o el archivo entero para
 > reempezar de cero.
+
+## Subida automática a Drive
+
+Después de bajar cada clase la puede subir a Google Drive (o a cualquier remoto)
+con [rclone](https://rclone.org/), y opcionalmente borrar la copia local para que
+un curso largo no te llene el disco. Se configura en **Opciones**.
+
+Se usa rclone en vez de un cliente propio por una razón concreta: los videos de un
+curso son archivos grandes, y ahí lo que falla es la subida reanudable por partes,
+los reintentos y el manejo de cortes. rclone ya tiene eso resuelto, y además
+resuelve el OAuth: `rclone config` abre el navegador una vez y después funciona
+desatendido.
+
+```powershell
+winget install Rclone.Rclone
+rclone config          # elegí "drive" y seguí los pasos
+```
+
+La configuración queda en `server/upload.json` (ignorado por git). Si la subida
+falla, el job queda como **"Bajado, sin subir"** y el archivo local **no** se
+borra: el video ya está en disco y perderlo por un error de red sería peor.
 
 ## Seguridad
 
@@ -188,6 +227,11 @@ Decisiones deliberadas, no las aflojes sin pensarlo:
 | Falla al crear el venv | Falta `python3-venv`. `run.sh` ya lo esquiva bootstrapeando pip sin sudo |
 | `running scripts is disabled` | PowerShell bloquea scripts. Usá `powershell -ExecutionPolicy Bypass -File .\run.ps1` |
 | `python` no se reconoce | Cerrá y reabrí la terminal despues de instalar Python (PATH) |
+| `El sitio te está frenando (429)` | Bajá el ritmo en Opciones y reencolá el curso: lo ya bajado no se repite |
+| `El sitio respondió 403` | No estás inscripto en el curso, o la sesión venció: reabrí el sitio y reintentá |
+| `Esa URL apunta a «quiz»` | Pegaste el link de un examen o una tarea. Usá el de una clase o el del curso |
+| Nombres de archivo cortados | Es a propósito: Windows corta las rutas en 260 caracteres y **ffmpeg falla al unir** si se pasa. El `[id]` del final evita que dos clases colisionen |
+| El popup dice "Token inválido" | El token de Opciones no coincide con `server/.token`. Antes esto se veía como "servidor caído" |
 
 ## Mantenimiento
 
@@ -195,5 +239,24 @@ yt-dlp se rompe seguido porque los sitios cambian. Cuando algo deje de andar,
 antes que nada actualizalo:
 
 ```bash
-./server/.venv/bin/python -m pip install --upgrade yt-dlp
+./server/.venv/bin/python -m pip install --upgrade yt-dlp          # Linux / macOS
 ```
+```powershell
+.\server\.venv\Scripts\python.exe -m pip install --upgrade yt-dlp   # Windows
+```
+
+Si cambiás `server/requirements.txt`, no hace falta borrar nada: `run.sh` y
+`run.ps1` guardan el hash del archivo con el que instalaron y reinstalan solos
+cuando cambia.
+
+## Tests
+
+```bash
+./server/.venv/bin/python -m pip install -r server/requirements-dev.txt
+./server/.venv/bin/python -m pytest tests/ -q
+```
+
+Corren en menos de un segundo, sin red y sin tocar el servidor: los tests **no**
+importan `app.py` a propósito, porque importarlo crea el `.token` y barre los
+archivos de cookies temporales — un `pytest` mientras baja un curso le rompería
+la sesión.

@@ -4,32 +4,53 @@
     <meta charset="utf-8" />
     <title>video-dl · Opciones</title>
     <style>
-      body { font: 14px/1.5 system-ui, sans-serif; max-width: 560px; margin: 40px auto; padding: 0 16px; color: #1f2933; }
+      /* Mismas variables que popup.css: la página de opciones se abre en una
+         pestaña normal y quedaba blanca sobre un navegador en modo oscuro. */
+      :root {
+        --fondo: #fff; --texto: #1f2933; --texto-suave: #6b7280;
+        --borde: #e5e7eb; --borde-fuerte: #d1d5db; --hover: #f9fafb;
+        --acento: #2563eb; --ok: #16a34a; --error-texto: #991b1b;
+        --aviso-fondo: #fffbeb; --aviso-borde: #fde68a; --aviso-texto: #78350f;
+        --ok-fondo: #f0fdf4; --ok-borde: #bbf7d0; --ok-texto: #166534;
+        --falta-fondo: #fef2f2; --falta-borde: #fecaca;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fondo: #12161c; --texto: #e5e7eb; --texto-suave: #9099a8;
+          --borde: #262d38; --borde-fuerte: #39424f; --hover: #1a1f27;
+          --acento: #3b82f6; --ok: #22c55e; --error-texto: #fca5a5;
+          --aviso-fondo: #2a2210; --aviso-borde: #574512; --aviso-texto: #fde68a;
+          --ok-fondo: #14251a; --ok-borde: #1f4530; --ok-texto: #86efac;
+          --falta-fondo: #2a1618; --falta-borde: #4c2226;
+        }
+      }
+      body { font: 14px/1.5 system-ui, sans-serif; max-width: 560px; margin: 40px auto; padding: 0 16px; color: var(--texto); background: var(--fondo); }
       h1 { font-size: 18px; }
-      h2 { font-size: 14px; margin: 32px 0 4px; padding-top: 20px; border-top: 1px solid #e5e7eb; }
+      h2 { font-size: 14px; margin: 32px 0 4px; padding-top: 20px; border-top: 1px solid var(--borde); }
       label { display: block; margin: 14px 0 4px; font-weight: 600; }
-      input[type="text"], input[type="number"] { width: 100%; padding: 7px; border: 1px solid #d1d5db; border-radius: 5px; font-family: ui-monospace, monospace; }
-      p.hint { font-size: 12px; color: #6b7280; margin: 4px 0 0; }
-      button { margin-top: 20px; padding: 8px 16px; background: #2563eb; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+      input[type="text"], input[type="number"] { width: 100%; padding: 7px; border: 1px solid var(--borde-fuerte); border-radius: 5px; font-family: ui-monospace, monospace; background: var(--fondo); color: var(--texto); }
+      p.hint { font-size: 12px; color: var(--texto-suave); margin: 4px 0 0; }
+      button { margin-top: 20px; padding: 8px 16px; background: var(--acento); color: #fff; border: none; border-radius: 6px; cursor: pointer; }
       button:disabled { opacity: .5; cursor: default; }
-      .saved { color: #16a34a; font-size: 13px; margin-left: 10px; }
-      .err { color: #991b1b; font-size: 13px; margin-left: 10px; }
-      .preset { display: flex; gap: 9px; align-items: flex-start; padding: 9px; border: 1px solid #e5e7eb; border-radius: 6px; margin-bottom: 7px; cursor: pointer; font-weight: 400; }
-      .preset:hover { background: #f9fafb; }
+      :focus-visible { outline: 2px solid var(--acento); outline-offset: 1px; }
+      .saved { color: var(--ok); font-size: 13px; margin-left: 10px; }
+      .err { color: var(--error-texto); font-size: 13px; margin-left: 10px; }
+      .preset { display: flex; gap: 9px; align-items: flex-start; padding: 9px; border: 1px solid var(--borde); border-radius: 6px; margin-bottom: 7px; cursor: pointer; font-weight: 400; }
+      .preset:hover { background: var(--hover); }
       .preset input { margin-top: 3px; }
       .preset b { display: block; }
-      .preset span { font-size: 12px; color: #6b7280; }
+      .preset span { font-size: 12px; color: var(--texto-suave); }
       .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
       .grid label { margin-top: 8px; }
       details { margin-top: 12px; }
-      summary { cursor: pointer; font-size: 13px; color: #2563eb; }
-      .note { background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 10px; font-size: 12px; color: #78350f; margin-top: 10px; }
+      summary { cursor: pointer; font-size: 13px; color: var(--acento); }
+      .note { background: var(--aviso-fondo); border: 1px solid var(--aviso-borde); border-radius: 6px; padding: 10px; font-size: 12px; color: var(--aviso-texto); margin-top: 10px; }
       .check-inline { display: flex; align-items: center; gap: 7px; font-weight: 400; }
-      .hint.danger { color: #991b1b; }
-      select { width: 100%; padding: 7px; border: 1px solid #d1d5db; border-radius: 5px; }
+      .hint.danger { color: var(--error-texto); }
+      select { width: 100%; padding: 7px; border: 1px solid var(--borde-fuerte); border-radius: 5px; background: var(--fondo); color: var(--texto); }
       .estado { padding: 9px; border-radius: 6px; font-size: 12px; margin: 10px 0; }
-      .estado.ok { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
-      .estado.falta { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+      .estado.ok { background: var(--ok-fondo); color: var(--ok-texto); border: 1px solid var(--ok-borde); }
+      .estado.falta { background: var(--falta-fondo); color: var(--error-texto); border: 1px solid var(--falta-borde); }
     </style>
   </head>
   <body>
@@ -64,16 +85,20 @@
         <div>
           <label for="gap_min">Pausa entre trabajos (s)</label>
           <div class="grid">
-            <input id="gap_min" type="number" min="0" title="mínimo" />
-            <input id="gap_max" type="number" min="0" title="máximo" />
+            <input id="gap_min" type="number" min="0" title="mínimo"
+                   aria-label="Pausa entre trabajos, mínimo en segundos" />
+            <input id="gap_max" type="number" min="0" title="máximo"
+                   aria-label="Pausa entre trabajos, máximo en segundos" />
           </div>
           <p class="hint">mín / máx — se elige al azar</p>
         </div>
         <div>
           <label for="video_sleep_min">Pausa entre videos (s)</label>
           <div class="grid">
-            <input id="video_sleep_min" type="number" min="0" title="mínimo" />
-            <input id="video_sleep_max" type="number" min="0" title="máximo" />
+            <input id="video_sleep_min" type="number" min="0" title="mínimo"
+                   aria-label="Pausa entre videos, mínimo en segundos" />
+            <input id="video_sleep_max" type="number" min="0" title="máximo"
+                   aria-label="Pausa entre videos, máximo en segundos" />
           </div>
           <p class="hint">dentro de una playlist / curso</p>
         </div>

@@ -93,9 +93,34 @@ async function applyPreset(preset) {
   }
 }
 
+// Etiquetas para poder nombrar el campo que está mal, en vez de un "revisá los
+// valores" que obliga a mirar los seis.
+const NOMBRES = {
+  rate_limit_kbps: "Velocidad máx.",
+  gap_min: "Pausa entre trabajos (mínimo)",
+  gap_max: "Pausa entre trabajos (máximo)",
+  video_sleep_min: "Pausa entre videos (mínimo)",
+  video_sleep_max: "Pausa entre videos (máximo)",
+};
+
 $("save-throttle").addEventListener("click", async () => {
   const patch = {};
-  for (const f of FIELDS) patch[f] = Number($(f).value);
+  for (const f of FIELDS) {
+    const crudo = $(f).value.trim();
+    // `Number("")` es 0, así que un campo vacío guardaba `gap_min: 0,
+    // gap_max: 0` y **apagaba el throttling entero, en silencio** — y quedaba
+    // persistido en settings.json. Un campo vacío es un error, no un cero.
+    if (crudo === "") {
+      flash("saved-throttle", `Completá "${NOMBRES[f]}": vacío apagaría el freno`, true);
+      return;
+    }
+    const valor = Number(crudo);
+    if (!Number.isFinite(valor) || valor < 0) {
+      flash("saved-throttle", `"${NOMBRES[f]}" tiene que ser un número ≥ 0`, true);
+      return;
+    }
+    patch[f] = Math.round(valor);
+  }
   if (patch.gap_max < patch.gap_min || patch.video_sleep_max < patch.video_sleep_min) {
     flash("saved-throttle", "El máximo no puede ser menor que el mínimo", true);
     return;

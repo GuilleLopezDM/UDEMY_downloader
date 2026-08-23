@@ -38,7 +38,9 @@ def carpeta_para(titulo: str | None) -> str | None:
     if not nombre:
         return None
 
-    if nombre.upper() in RESERVADOS_WINDOWS:
+    # El nombre reservado lo es CON cualquier extensión: `NUL.txt` sigue siendo
+    # el dispositivo NUL. Comparar el nombre completo dejaba pasar esos casos.
+    if nombre.split(".", 1)[0].upper() in RESERVADOS_WINDOWS:
         nombre = f"_{nombre}"
 
     if len(nombre) > LARGO_MAXIMO:
