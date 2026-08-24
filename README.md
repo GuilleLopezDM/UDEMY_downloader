@@ -12,7 +12,7 @@ Uso personal. No está pensada para publicarse en ninguna store.
   Navegador                          Servidor local (Python)
   ┌─────────────────┐                ┌──────────────────────┐
   │ extensión MV3   │  HTTP + token  │ FastAPI              │
-  │  · lee la URL   │ ──────────────►│  · /probe            │
+  │  · lee la URL   │ ──────────────►│  · /probe /diagnose  │
   │  · lee cookies  │   127.0.0.1    │  · /download         │
   │  · muestra      │ ◄──────────────│  · /jobs (progreso)  │
   │    progreso     │                │         │            │
