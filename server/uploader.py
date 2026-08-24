@@ -50,6 +50,40 @@ def destino(remoto: str, carpeta_base: str, subcarpeta: str | None) -> str:
     return f"{remoto}:{'/'.join(partes)}" if partes else f"{remoto}:"
 
 
+def _comando(origen: str, ruta_remota: str) -> list[str]:
+    """Arma la línea de rclone. Separado de `subir` para poder testearlo."""
+    return [
+        "rclone", "copy", origen, ruta_remota,
+        "--stats", "1s",
+        "--stats-one-line",
+        # Sin esto rclone lista el destino entero antes de subir un solo archivo.
+        "--no-traverse",
+        "--retries", "5",
+        "--low-level-retries", "10",
+        # Sin esto, NINGÚN archivo cuyo nombre venga de yt-dlp con homoglifos se
+        # sube. El backend local de rclone traduce nombres en los dos sentidos:
+        # al escribir convierte los caracteres que Windows prohíbe (`:`, `?`,
+        # `*`, `|`, `<`, `>`) a su versión de ancho completo (`：`, `？`, …), y al
+        # leer hace la inversa. yt-dlp hace exactamente la misma sustitución con
+        # `windowsfilenames`, así que el nombre en disco YA viene con `：`. rclone
+        # entonces lo re-codifica para no perder la reversibilidad, busca un
+        # nombre que no existe, y falla con un mensaje que despista del todo:
+        #
+        #   Local file system at ...\02 - Conceptos clave： ....mp4:
+        #   error reading source root directory: directory not found
+        #
+        # —o sea, trata el archivo como un directorio inexistente—. Comprobado
+        # en Windows: el mismo `rclone copy` falla con el nombre real y funciona
+        # con esta bandera, y un archivo creado a mano con `：` reproduce el fallo.
+        #
+        # Apagar la traducción es seguro acá porque los nombres los genera yt-dlp
+        # con `windowsfilenames: True`: ya son válidos en disco y no necesitan que
+        # nadie los reescriba. El precio es que en el remoto quedan con `：` en vez
+        # de `:`, igual que en local — consistente, y legible.
+        "--local-encoding", "None",
+    ]
+
+
 def subir(
     archivo: str,
     remoto: str,
@@ -72,15 +106,7 @@ def subir(
         raise ErrorDeSubida(f"No existe el archivo a subir: {archivo}")
 
     ruta_remota = destino(remoto, carpeta_base, subcarpeta)
-    comando = [
-        "rclone", "copy", str(origen), ruta_remota,
-        "--stats", "1s",
-        "--stats-one-line",
-        # Sin esto rclone lista el destino entero antes de subir un solo archivo.
-        "--no-traverse",
-        "--retries", "5",
-        "--low-level-retries", "10",
-    ]
+    comando = _comando(str(origen), ruta_remota)
 
     try:
         proceso = subprocess.Popen(

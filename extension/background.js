@@ -8,10 +8,11 @@
 // `chrome.storage.session` sobrevive al reciclado del worker y se limpia sola al
 // cerrar el navegador, que es exactamente la duración que queremos.
 
-import { api } from "./api.js";
+import { api, collectCookies } from "./api.js";
 
 const POLL_ALARM = "video-dl-poll";
 const CLAVE_NOTIFICADOS = "jobsNotificados";
+const CLAVE_ULTIMO_REFRESCO = "ultimoRefrescoSesion";
 const CLAVE_SEMBRADO = "notificadorSembrado";
 // Un curso son 200 jobs; el tope evita que la lista crezca sin control en una
 // sesión larga de navegador.
@@ -55,12 +56,14 @@ async function guardarEstado(notificados) {
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== POLL_ALARM) return;
-  let jobs;
+  let jobs, sesion;
   try {
-    ({ jobs } = await api.jobs());
+    ({ jobs, sesion } = await api.jobs());
   } catch {
     return; // server down or token unset; nothing to report
   }
+
+  await quizasRefrescarSesion(sesion);
 
   const { notificados, sembrado } = await leerEstado();
 
@@ -96,6 +99,44 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (hubo || !sembrado) await guardarEstado(notificados);
   actualizarBadge(jobs);
 });
+
+// Refresca la sesión de la cola desde el navegador, sin que el usuario haga nada.
+//
+// Las cookies se capturan UNA vez, al encolar. Un curso de 200 clases en preset
+// cauteloso son horas, y el token de Udemy rota en el medio: todas las clases
+// que faltaban salían con una sesión muerta y el sitio devolvía 403. Este worker
+// ya se despierta cada 30 s para el badge, así que refrescar desde acá no cuesta
+// ni un pedido de más al sitio: las cookies se leen del propio navegador.
+const MARGEN_VENCIMIENTO_MS = 30 * 60_000;   // refrescar si vence dentro de esto
+const CADA_MS = 5 * 60_000;                  // y como mucho con esta frecuencia
+
+async function quizasRefrescarSesion(sesion) {
+  // `sesion.url` es la URL con la que se juntaron las cookies, y tiene que ser
+  // ESA: en un portal de Udemy Business las clases se encolan como
+  // `www.udemy.com/...` y ahí no viven las cookies host-only del portal, que son
+  // justamente las que autentican.
+  if (!sesion?.pendientes || !sesion.url) return;
+
+  const ahora = Date.now();
+  const { [CLAVE_ULTIMO_REFRESCO]: ultimo = 0 } = await chrome.storage.session.get({
+    [CLAVE_ULTIMO_REFRESCO]: 0,
+  });
+  if (ahora - ultimo < CADA_MS) return;
+
+  // `vence_en` en null son cookies de sesión, sin fecha: no se puede anticipar
+  // el problema, así que se refresca igual cada CADA_MS.
+  if (sesion.vence_en != null && sesion.vence_en * 1000 - ahora > MARGEN_VENCIMIENTO_MS) return;
+
+  try {
+    const cookies = await collectCookies(sesion.url);
+    if (!cookies.length) return;
+    await api.refreshCookies(cookies);
+    await chrome.storage.session.set({ [CLAVE_ULTIMO_REFRESCO]: ahora });
+  } catch {
+    // El navegador puede negar las cookies, o el server puede estar cayéndose.
+    // No se reintenta acá: la próxima alarma lo vuelve a intentar sola.
+  }
+}
 
 function actualizarBadge(jobs) {
   // `waiting` y `uploading` faltaban: durante las pausas del throttle —que en

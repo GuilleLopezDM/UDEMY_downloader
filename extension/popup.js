@@ -50,6 +50,8 @@ let urlAnalizada = null;
 
 function ocultarAnalisis() {
   urlAnalizada = null;
+  $("diagnose").className = "link hidden";
+  $("diagnose-result").className = "diag hidden";
   $("download-course").className = "primary full hidden";
   $("probe-result").className = "probe hidden";
   $("probe-result").textContent = "";
@@ -74,6 +76,8 @@ async function init() {
   $("download-course").addEventListener("click", onDownloadCourse);
   $("clear").addEventListener("click", onClear);
   $("cancel-all").addEventListener("click", onCancelAll);
+  $("refresh-session").addEventListener("click", onRefreshSession);
+  $("diagnose").addEventListener("click", onDiagnose);
   $("options").addEventListener("click", (e) => {
     e.preventDefault();
     chrome.runtime.openOptionsPage();
@@ -197,9 +201,38 @@ async function onProbe() {
     }
   } catch (e) {
     showMessage(e.message, "error");
+    // El botón de diagnóstico aparece sólo cuando hubo un fallo: es lo único
+    // que distingue "no tenés acceso" de "faltan headers" o "host equivocado".
+    $("diagnose").className = "link";
   } finally {
     $("probe").textContent = "Analizar";
     actualizarBotones();
+  }
+}
+
+async function onDiagnose() {
+  const caja = $("diagnose-result");
+  const boton = $("diagnose");
+  boton.disabled = true;
+  boton.textContent = "Probando…";
+  caja.className = "diag";
+  caja.textContent = "Probando la página y la API, con y sin sesión…";
+  try {
+    const url = urlActual();
+    const r = await api.diagnose(url, await cookiesIfWanted(url));
+    const filas = Object.entries(r.pruebas).map(
+      ([n, p]) => `${String(p.estado ?? "—").padEnd(4)} ${n}`,
+    );
+    const tokens = (r.tokens || [])
+      .map((t) => `  ${t.nombre} @ ${t.dominio}${t.host_only ? " (host-only)" : ""} → ${t.huella}`)
+      .join("\n");
+    caja.textContent =
+      `${filas.join("\n")}\n\ntokens:\n${tokens || "  (ninguno)"}\n\n${r.lectura}`;
+  } catch (e) {
+    caja.textContent = `No se pudo diagnosticar: ${e.message}`;
+  } finally {
+    boton.disabled = false;
+    boton.textContent = "¿Por qué falla? Diagnosticar";
   }
 }
 
@@ -269,6 +302,60 @@ async function onCancelAll() {
     showMessage(e.message, "error");
   }
 }
+
+// La sesión de la cola se refresca sola desde el service worker mientras hay
+// trabajos pendientes. Este botón es el control manual: sirve cuando acabás de
+// volver a loguearte en Udemy y no querés esperar al próximo ciclo.
+async function onRefreshSession() {
+  const boton = $("refresh-session");
+  boton.disabled = true;
+  try {
+    const url = sesionActual?.url || urlActual();
+    const cookies = await collectCookies(url);
+    if (!cookies.length) {
+      showMessage("El navegador no devolvió cookies para ese sitio. ¿Seguís logueado?", "error");
+      return;
+    }
+    const { actualizados } = await api.refreshCookies(cookies);
+    showMessage(
+      actualizados
+        ? `Sesión actualizada en ${actualizados} clase(s) pendiente(s).`
+        : "No hay clases pendientes que necesiten la sesión.",
+      "info",
+    );
+    await refreshJobs();
+  } catch (e) {
+    showMessage(e.message, "error");
+  } finally {
+    boton.disabled = false;
+  }
+}
+
+function pintarSesion(sesion) {
+  sesionActual = sesion;
+  const boton = $("refresh-session");
+  if (!sesion?.pendientes || !sesion.url) {
+    boton.className = "link hidden";
+    return;
+  }
+  boton.className = "link";
+  if (sesion.vence_en == null) {
+    boton.textContent = "Actualizar sesión";
+    boton.title = "Cookies de sesión, sin fecha de vencimiento conocida";
+    return;
+  }
+  const minutos = Math.round((sesion.vence_en * 1000 - Date.now()) / 60000);
+  if (minutos <= 0) {
+    boton.textContent = "Sesión vencida — actualizar";
+    boton.title = "Las clases que faltan van a fallar con 403 hasta que la actualices";
+  } else {
+    const restante = minutos < 90 ? `${minutos} min` : `${Math.round(minutos / 60)} h`;
+    boton.textContent = "Actualizar sesión";
+    boton.title = `La sesión de la cola vence en ${restante}. Se refresca sola, o forzalo acá.`;
+  }
+}
+
+let sesionActual = null;
 
 const LABELS = {
   queued: "En cola",
@@ -348,8 +435,12 @@ function crearFila(job) {
   reintentar.title = "Vuelve a encolarla con las opciones que estén elegidas ahora";
   reintentar.addEventListener("click", async () => {
     const u = li.dataset.url;
+    // Las cookies se piden por la URL del CURSO, no por la de la clase: la de la
+    // clase la generó yt-dlp sobre `www.udemy.com`, y en un portal de Udemy
+    // Business ahí no viven las cookies host-only que autentican.
+    const paraCookies = li.dataset.cookieUrl || u;
     try {
-      await api.download({ url: u, cookies: await cookiesIfWanted(u), ...opcionesActuales() });
+      await api.download({ url: u, cookies: await cookiesIfWanted(paraCookies), ...opcionesActuales() });
       showMessage("Reencolada.", "info");
       await refreshJobs();
     } catch (e) {
@@ -383,6 +474,7 @@ function poner(nodo, prop, valor) {
 function pintarFila(li, job) {
   const p = li._partes;
   li.dataset.url = job.url || "";
+  li.dataset.cookieUrl = job.cookie_url || "";
 
   if (job.position) {
     poner(p.num, "textContent", `${job.position}/${job.total}`);
@@ -415,6 +507,9 @@ function pintarFila(li, job) {
   poner(p.right, "textContent", derecha);
 
   poner(p.err, "textContent", job.error || "");
+  // El crudo de yt-dlp va al tooltip: ocupa mucho para mostrarlo siempre, pero
+  // cuando la traducción se equivoca es lo único que sirve.
+  p.err.title = job.error_detalle || "";
   poner(p.err, "className", job.error ? "job-error" : "job-error hidden");
 
   const activo = ACTIVOS.includes(job.status);
@@ -436,9 +531,9 @@ function pintarVacio(list, texto) {
 }
 
 async function refreshJobs() {
-  let jobs;
+  let jobs, sesion;
   try {
-    ({ jobs } = await api.jobs());
+    ({ jobs, sesion } = await api.jobs());
     marcarEstado(true, "Servidor conectado");
   } catch (e) {
     // Un token mal configurado NO es un servidor caído: /health no pide token,
@@ -452,6 +547,8 @@ async function refreshJobs() {
     return;
   }
 
+  pintarSesion(sesion);
+
   const list = $("job-list");
 
   if (!jobs.length) {
@@ -461,6 +558,7 @@ async function refreshJobs() {
     }
     pintarVacio(list, "Todavía no hay descargas.");
     $("cancel-all").className = "link hidden";
+    $("refresh-session").className = "link hidden";
     return;
   }
   list.querySelector("li.vacio")?.remove();

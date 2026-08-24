@@ -125,3 +125,59 @@ def test_summarize_avisa_si_falta_la_auth_de_udemy():
 def test_summarize_sin_cookies():
     assert mod.summarize([]) == "sin cookies"
     assert mod.summarize(None) == "sin cookies"
+
+
+# ---- vencimiento de la sesión ---------------------------------------------
+
+
+def test_vence_en_toma_la_mas_temprana_de_las_de_auth():
+    """Sólo cuentan `access_token` y `client_id`: son las que el extractor
+    convierte en los headers de autorización de Udemy."""
+    c = [
+        {"name": "access_token", "domain": "u", "expirationDate": 2000.0},
+        {"name": "client_id", "domain": "u", "expirationDate": 1500.0},
+        {"name": "otra_cualquiera", "domain": "u", "expirationDate": 10.0},
+    ]
+    assert mod.vence_en(c) == 1500.0
+
+
+def test_vence_en_ignora_las_de_sesion():
+    """Sin `expirationDate` no hay fecha que reportar."""
+    assert mod.vence_en([{"name": "access_token", "domain": "u"}]) is None
+    assert mod.vence_en([]) is None
+    assert mod.vence_en(None) is None
+
+
+AHORA = 1_800_000_000.0
+
+
+@pytest.fixture
+def reloj_fijo(monkeypatch):
+    """Sin congelar el reloj, `time.time()` avanza entre armar el caso y llamar,
+    y 7200 s se reportan como "1h59m". El test fallaba por eso, no por el código."""
+    monkeypatch.setattr(mod.time, "time", lambda: AHORA)
+
+
+def auth(desplazamiento):
+    return [{"name": n, "value": "secreto", "domain": "u",
+             "expirationDate": AHORA + desplazamiento}
+            for n in ("access_token", "client_id")]
+
+
+def test_summarize_avisa_cuando_la_sesion_ya_vencio(reloj_fijo):
+    """Es el dato que convierte un 403 a mitad de un curso en un diagnóstico:
+    las cookies se capturan UNA vez, al encolar, y el curso dura horas."""
+    assert "VENCIDA" in mod.summarize(auth(-60))
+
+
+@pytest.mark.parametrize(
+    ("segundos", "esperado"),
+    [(7200, "vence en 2h00m"), (5400, "vence en 1h30m"), (300, "vence en 0h05m"),
+     (3 * 86400, "vence en 3d"), (30 * 86400 - 1, "vence en 30d")],
+)
+def test_summarize_reporta_cuanto_falta(reloj_fijo, segundos, esperado):
+    assert esperado in mod.summarize(auth(segundos))
+
+
+def test_summarize_sigue_sin_exponer_valores_con_el_vencimiento(reloj_fijo):
+    assert "secreto" not in mod.summarize(auth(3600))

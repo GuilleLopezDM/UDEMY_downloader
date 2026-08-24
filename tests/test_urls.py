@@ -25,9 +25,6 @@ from urls import normalize
             "https://empresa.udemy.com/course/sys/#/lecture/1",
         ),
         ("http://www.udemy.com/course/sys/learn/lecture/1", "http://www.udemy.com/course/sys/#/lecture/1"),
-        # Curso entero: UdemyCourseIE espera el slug como primer segmento.
-        ("https://www.udemy.com/course/system-design/", "https://www.udemy.com/system-design/"),
-        ("https://www.udemy.com/course/system-design", "https://www.udemy.com/system-design/"),
     ],
 )
 def test_traduce_lo_que_yt_dlp_no_entiende(entrada, esperado):
@@ -44,6 +41,13 @@ def test_traduce_lo_que_yt_dlp_no_entiende(entrada, esperado):
         "https://www.udemy.com/course/sys/learn/practice/999",
         "https://www.udemy.com/course/sys/learn/assignment/7",
         "https://www.udemy.com/course/sys/learn/article/42",
+        # **El curso va TAL CUAL.** Reescribirlo a `/<slug>/` —el formato viejo—
+        # era lo que producía el 403 contra el portal de Udemy Business:
+        # `_download_webpage` descarga la URL que se le pasa, y `/course/<slug>/`
+        # responde 200 mientras que `/<slug>/` no.
+        "https://personalpy.udemy.com/course/software-architecture-design-of-modern-large-scale-systems",
+        "https://www.udemy.com/course/system-design/",
+        "https://www.udemy.com/course/system-design",
         # Sin `/course/` no hay nada que traducir.
         "https://www.udemy.com/user/algo/",
         # Otros sitios pasan intactos: la herramienta acepta cualquiera que
@@ -96,3 +100,43 @@ def test_lo_descargable_no_dispara_el_aviso(url):
     from urls import motivo_no_soportado
 
     assert motivo_no_soportado(url) is None
+
+
+def test_el_curso_conserva_el_portal_de_udemy_business():
+    """El portal es donde vive la inscripción: mandarlo a www pierde el acceso."""
+    url = "https://personalpy.udemy.com/course/software-architecture/"
+    assert normalize(url) == url
+
+
+def test_la_clase_conserva_el_portal():
+    url = "https://personalpy.udemy.com/course/software-architecture/learn/lecture/37411654"
+    assert normalize(url) == "https://personalpy.udemy.com/course/software-architecture/#/lecture/37411654"
+
+
+def test_la_pagina_que_se_pide_de_verdad_es_la_del_curso():
+    """El fragmento no viaja por HTTP: `#/lecture/N` termina pidiendo
+    `/course/<slug>/`, que es la URL que Udemy sirve hoy. Ese es todo el truco."""
+    from urllib.parse import urlsplit
+
+    salida = normalize("https://personalpy.udemy.com/course/sw-arch/learn/lecture/1")
+    partes = urlsplit(salida)
+    assert f"{partes.scheme}://{partes.netloc}{partes.path}" == "https://personalpy.udemy.com/course/sw-arch/"
+
+
+@pytest.mark.parametrize(
+    ("url", "esperado"),
+    [
+        ("https://personalpy.udemy.com/course/software-architecture-design-of-modern-large-scale-systems",
+         "Software architecture design of modern large scale systems"),
+        ("https://www.udemy.com/course/portafolio-financiero/learn/lecture/1", "Portafolio financiero"),
+        ("https://www.youtube.com/playlist?list=x", None),
+        ("https://www.udemy.com/user/algo/", None),
+    ],
+)
+def test_nombre_desde_url(url, esperado):
+    """Respaldo para cuando el curso no trae título: yt-dlp lo saca de un bloque
+    `ng-init` que las páginas modernas de Udemy ya no tienen, y sin él las 200
+    clases caen sueltas en la raíz de downloads/."""
+    from urls import nombre_desde_url
+
+    assert nombre_desde_url(url) == esperado

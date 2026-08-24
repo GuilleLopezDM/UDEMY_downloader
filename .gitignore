@@ -20,3 +20,5 @@ video-dl-windows.zip
 credentials.json
 .sentinel/
 server/upload.json
+server/errores.log
+server/errores.log.1

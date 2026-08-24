@@ -11,6 +11,7 @@ import shutil
 import threading
 import time
 import uuid
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
@@ -20,9 +21,9 @@ import yt_dlp
 import throttle as throttle_cfg
 import upload_config
 import uploader
-from cookies import discard, write_netscape_cookiefile
+from cookies import discard, vence_en, write_netscape_cookiefile
 from naming import carpeta_para
-from urls import motivo_no_soportado, normalize
+from urls import motivo_no_soportado, nombre_desde_url, normalize, portal_udemy
 
 
 # Estados de los que un job ya no sale. Se listan una sola vez: estaban
@@ -36,9 +37,119 @@ TERMINALES = ("done", "skipped", "error", "upload_error", "cancelled")
 # extractor — con lo cual "reencolar baja solo lo que falta" deja de ser cierto.
 _FIRMA_EN_URL = ("signature=", "policy=", "key-pair-id=", "x-amz-signature=")
 
+# Estados en los que el jar de cookies todavía no se materializó, o sea que
+# cambiar `_cookies` todavía surte efecto. Un job `running` ya tiene su archivo
+# escrito y yt-dlp abierto sobre él: refrescarlo no haría nada.
+REFRESCABLES = ("queued", "waiting")
+
+
+# Los errores crudos van también a un archivo. La consola del servidor los
+# muestra, pero se pierden al cerrar la ventana o al scrollear, y son justo lo
+# que hace falta cuando un curso falla tres horas después de arrancar.
+ARCHIVO_ERRORES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "errores.log")
+TOPE_ERRORES_BYTES = 2 * 1024 * 1024
+
+
+def _registrar_fallo(job: "Job", crudo: str) -> None:
+    """Anota el error crudo de yt-dlp, sin traducir y sin recortar."""
+    try:
+        if os.path.exists(ARCHIVO_ERRORES) and os.path.getsize(ARCHIVO_ERRORES) > TOPE_ERRORES_BYTES:
+            # Sin rotación real: se empieza de nuevo. Lo que importa es el fallo
+            # de ahora, no el historial.
+            os.replace(ARCHIVO_ERRORES, ARCHIVO_ERRORES + ".1")
+        marca = time.strftime("%Y-%m-%d %H:%M:%S")
+        ubicacion = f"{job.position}/{job.total}" if job.position else "suelta"
+        with open(ARCHIVO_ERRORES, "a", encoding="utf-8") as fh:
+            fh.write(f"\n[{marca}] {ubicacion}  {job.title or ''}\n")
+            fh.write(f"  url: {job.url}\n")
+            for linea in crudo.splitlines():
+                fh.write(f"  {linea}\n")
+    except OSError:
+        # Un fallo al registrar un fallo no puede tumbar la descarga.
+        pass
+
+
+_UDEMY_PARCHEADO = False
+
+# El User-Agent que `UdemyIE._download_webpage_handle` escribe a mano
+# (`udemy.py:125`): Chrome 72, de enero de 2019.
+_UA_DE_2019 = "Chrome/72.0.3626.109"
+
+
+def parchear_udemy_business() -> None:
+    """Dos parches al extractor de Udemy. Los dos hacen falta y son distintos.
+
+    **1. El host de la API.** yt-dlp construye
+    `https://www.udemy.com/api-2.0/users/me/subscribed-courses/…` con el host
+    clavado (`udemy.py:104-110`). Contra un portal de Udemy Business eso devuelve
+    403 en TODAS las clases: la inscripción la tiene la organización, no la
+    cuenta de www. Medido con la sesión real del usuario:
+
+        200  users/me/ en el portal        403  users/me/ en www
+        200  subscribed-courses/ en portal 403  subscribed-courses/ en www
+
+    Se envuelve `_download_json` y no `_download_lecture` para no copiar los
+    parámetros `fields[lecture]` / `fields[asset]`, que cambian con las
+    versiones. Sólo se reescriben los endpoints `users/me/`, que son los que
+    dependen de quién sos; el del temario (`api-2.0/courses/<id>/…`) se deja
+    intacto porque desde www funciona.
+
+    **2. El User-Agent de 2019.** `_download_webpage_handle` (`udemy.py:123-126`)
+    pisa el User-Agent con **Chrome 72.0.3626.109**, de enero de 2019, y lo hace
+    DESPUÉS de copiar los headers, así que gana sobre cualquier configuración.
+    Udemy tiene protección anti-bot —el propio yt-dlp busca los marcadores de
+    PerimeterX doce líneas más abajo (`udemy.py:132-135`)— y un Chrome de seis
+    años atrás es justo lo que esa protección marca. Medido: la MISMA página, con
+    las MISMAS cookies, devuelve 200 con un Chrome moderno y 403 con el viejo.
+
+    Se intercepta en `InfoExtractor._download_webpage_handle` y sólo cuando
+    aparece ese UA exacto: así no se duplica el chequeo anti-captcha que el
+    extractor hace después, y ningún otro extractor se ve afectado.
+    """
+    global _UDEMY_PARCHEADO
+    if _UDEMY_PARCHEADO:
+        return
+    from yt_dlp.extractor.common import InfoExtractor
+    from yt_dlp.extractor.udemy import UdemyIE
+    from yt_dlp.utils.networking import std_headers
+
+    # --- 1. host de la API -------------------------------------------------
+    original_json = UdemyIE._download_json
+    prefijo = "https://www.udemy.com"
+    solo_estos = f"{prefijo}/api-2.0/users/me/"
+
+    def _download_json(self, url_or_request, *args, **kwargs):
+        portal = self.get_param("portal_udemy")
+        if portal and isinstance(url_or_request, str) and url_or_request.startswith(solo_estos):
+            url_or_request = portal + url_or_request[len(prefijo):]
+        return original_json(self, url_or_request, *args, **kwargs)
+
+    UdemyIE._download_json = _download_json
+
+    # --- 2. User-Agent -----------------------------------------------------
+    original_pagina = InfoExtractor._download_webpage_handle
+
+    def _download_webpage_handle(self, *args, **kwargs):
+        cabeceras = kwargs.get("headers") or {}
+        if _UA_DE_2019 in str(cabeceras.get("User-Agent", "")):
+            cabeceras = dict(cabeceras)
+            cabeceras["User-Agent"] = std_headers["User-Agent"]
+            kwargs["headers"] = cabeceras
+        return original_pagina(self, *args, **kwargs)
+
+    InfoExtractor._download_webpage_handle = _download_webpage_handle
+    _UDEMY_PARCHEADO = True
+
+
+parchear_udemy_business()
+
 
 class Cancelled(Exception):
     """Raised from inside a progress hook to abort a running download."""
+
+
+class SesionVencida(Exception):
+    """Las cookies capturadas al encolar ya no sirven."""
 
 
 def url_de_entrada(entrada: dict) -> str | None:
@@ -90,6 +201,10 @@ class Job:
     eta: int | None = None
     filepath: str | None = None
     error: str | None = None
+    # El mensaje crudo de yt-dlp, sin traducir. `error` se lee mejor pero pierde
+    # el detalle: cuando la traducción se equivoca —pasó— no queda NADA con qué
+    # diagnosticar. Los dos, siempre.
+    error_detalle: str | None = None
     wait_seconds: int | None = None
     # Posición dentro del curso, 1-based. None para una descarga suelta.
     position: int | None = None
@@ -103,6 +218,11 @@ class Job:
     # encolar significaba escribir una copia de la sesión viva por clase —200 en
     # un curso— y dejarlas en disco durante las horas que dura la cola.
     _cookies: list[dict] | None = field(default=None, repr=False)
+    # URL con la que se juntaron las cookies. Va por job y no en un global del
+    # gestor porque un global se pisa: reintentar UNA clase lo dejaba apuntando
+    # a la URL que generó yt-dlp (`www.udemy.com/course/learn/v4/t/lecture/…`),
+    # y ahí no viven las cookies host-only del portal de Udemy Business.
+    _cookie_url: str | None = field(default=None, repr=False)
     _cookiefile: str | None = field(default=None, repr=False)
 
     def public(self) -> dict[str, Any]:
@@ -118,10 +238,16 @@ class Job:
             "eta": self.eta,
             "filepath": self.filepath,
             "error": self.error,
+            "error_detalle": self.error_detalle,
             "wait_seconds": self.wait_seconds,
             "position": self.position,
             "total": self.total,
             "subfolder": self.subfolder,
+            # La URL con la que se juntaron las cookies. Viaja al popup para que
+            # "Reintentar" las vuelva a pedir del MISMO host: `url` es la que
+            # genera yt-dlp (`www.udemy.com/course/learn/v4/t/lecture/…`) y pedir
+            # las cookies de ahí devuelve las de www, no las del portal.
+            "cookie_url": self._cookie_url,
             "remote_path": self.remote_path,
         }
 
@@ -185,6 +311,8 @@ class JobManager:
         #    del formato elegido, firmada y con vencimiento (ver `url_de_entrada`).
         # Se pierde `duration` por clase, que la extensión no muestra.
         opts["extract_flat"] = "in_playlist"
+        if (portal := portal_udemy(url)):
+            opts["portal_udemy"] = portal
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(normalize(url), download=False)
@@ -242,6 +370,7 @@ class JobManager:
         position: int | None = None,
         total: int | None = None,
         subfolder: str | None = None,
+        cookie_url: str | None = None,
     ) -> Job:
         motivo = motivo_no_soportado(url)
         if motivo:
@@ -255,6 +384,7 @@ class JobManager:
         )
         # Guardadas, no escritas: el jar se materializa en `_run`.
         job._cookies = list(cookies) if cookies else None
+        job._cookie_url = (cookie_url or url) if cookies else None
         with self._lock:
             self._jobs[job.id] = job
             self._prune_finished()
@@ -289,9 +419,12 @@ class JobManager:
         # numeración saltearía números y dejaría huecos en los nombres.
         utiles = [(e, u) for e in entradas if (u := url_de_entrada(e))]
 
-        # Todo el curso a una carpeta propia. Si el título no da un nombre
-        # usable, `carpeta_para` devuelve None y las clases van a la raíz.
-        carpeta = carpeta_para(info.get("title"))
+        # Todo el curso a una carpeta propia. El título puede venir vacío —las
+        # páginas modernas de Udemy ya no traen el bloque del que yt-dlp lo saca—
+        # y entonces las 200 clases caían sueltas en la raíz de `downloads/`, con
+        # su prefijo de orden y sin nada que dijera de qué curso son. El slug de
+        # la URL siempre está, así que sirve de respaldo.
+        carpeta = carpeta_para(info.get("title")) or carpeta_para(nombre_desde_url(url))
 
         creados = []
         for indice, (entrada, destino) in enumerate(utiles, start=1):
@@ -305,6 +438,9 @@ class JobManager:
                     title=entrada.get("title"),
                     position=indice, total=len(utiles),
                     subfolder=carpeta,
+                    # La URL del CURSO, no la que yt-dlp generó para la clase:
+                    # es la única que devuelve las cookies del portal.
+                    cookie_url=url,
                 ).public()
             )
 
@@ -379,6 +515,54 @@ class JobManager:
                     job._cookies = None
         return len(pendientes)
 
+    def refrescar_cookies(self, cookies: list[dict]) -> int:
+        """Reemplaza la sesión de los trabajos que todavía no arrancaron.
+
+        Las cookies se capturan UNA sola vez, al encolar. Un curso largo dura
+        horas y el token de Udemy rota en el medio: sin esto, todas las clases
+        que faltan salen con una sesión muerta y el sitio devuelve 403 — que es
+        indistinguible de "no estás inscripto" si uno no mira la fecha.
+
+        No toca el job en curso: su jar ya está escrito y yt-dlp lo tiene
+        abierto. La sesión nueva se aplica desde el siguiente.
+
+        Tampoco le agrega cookies a un job que se encoló sin ellas: eso fue una
+        decisión del usuario (el check destildado), no un descuido.
+        """
+        if not cookies:
+            return 0
+        nuevas = list(cookies)
+        actualizados = 0
+        with self._lock:
+            for job in self._jobs.values():
+                if job.status in REFRESCABLES and job._cookies is not None:
+                    job._cookies = nuevas
+                    actualizados += 1
+        return actualizados
+
+    def sesion(self) -> dict[str, Any]:
+        """Estado de la sesión de la cola, para que el navegador sepa si refrescar.
+
+        Devuelve para QUÉ url hay que pedir las cookies, cuántos trabajos
+        dependen de ellas y cuándo vencen. El `None` en `vence_en` significa que
+        son cookies de sesión, sin fecha: ahí no se puede anticipar el problema y
+        conviene refrescar cada tanto igual.
+        """
+        with self._lock:
+            pendientes = [
+                j for j in self._jobs.values()
+                if j.status in REFRESCABLES and j._cookies
+            ]
+            fechas = [f for f in (vence_en(j._cookies) for j in pendientes) if f]
+        # La URL sale de los propios jobs pendientes: la más repetida es la del
+        # curso que está en cola, aunque una descarga suelta haya entrado después.
+        urls = Counter(j._cookie_url for j in pendientes if j._cookie_url)
+        return {
+            "url": urls.most_common(1)[0][0] if urls else None,
+            "pendientes": len(pendientes),
+            "vence_en": min(fechas) if fechas else None,
+        }
+
     def shutdown(self) -> None:
         """Corta la cola entera. Se llama al apagar el servidor.
 
@@ -440,13 +624,25 @@ class JobManager:
         No se usa `%(playlist_index)s` de yt-dlp porque el fan-out convierte cada
         clase en una descarga independiente: para yt-dlp no hay playlist, así que
         ese campo vendría vacío. El número lo ponemos nosotros.
+
+        **Lo que distingue dos archivos va SIEMPRE a la izquierda del título.**
+        `trim_file_name` recorta por la derecha, así que un `[%(id)s]` al final es
+        lo PRIMERO que se pierde. Medido en la máquina real: un título largo
+        dentro de una carpeta de curso de 111 caracteres dejaba
+        `001 - Introduction to System Design and Architectu.mp4`, sin id — y el
+        comentario de esta función decía que el id "evita colisiones tras el
+        truncado", que era exactamente al revés.
+
+        Con prefijo de orden alcanza con el número: la posición es única dentro
+        de la carpeta del curso. Sin prefijo —una descarga suelta— el id pasa
+        adelante, porque es lo único que separa dos videos que compartan los
+        primeros 50 caracteres del título.
         """
-        base = "%(title)s [%(id)s].%(ext)s"
         if job.position is None:
-            return base
+            return "[%(id)s] %(title)s.%(ext)s"
         # El ancho sale del total: 40 clases -> "01", 150 clases -> "001".
         ancho = max(2, len(str(job.total or job.position)))
-        return f"{job.position:0{ancho}d} - {base}"
+        return f"{job.position:0{ancho}d} - %(title)s [%(id)s].%(ext)s"
 
     @classmethod
     def _recorte_de_nombre(cls, directorio: str) -> int:
@@ -514,10 +710,28 @@ class JobManager:
             # quedaban en disco hasta que su job terminara, o sea horas. Así hay
             # como mucho una a la vez.
             if job._cookies:
+                # Las cookies son una foto del momento en que se encoló. En un
+                # curso largo el token puede vencer mientras la cola avanza, y
+                # entonces el sitio responde 403 — indistinguible de "no estás
+                # inscripto" si no se mira la fecha. Se comprueba ANTES de salir
+                # a la red, para no gastar un request ni una pausa en algo que
+                # ya se sabe que va a fallar.
+                vence = vence_en(job._cookies)
+                if vence is not None and vence <= time.time():
+                    raise SesionVencida(
+                        "La sesión que se capturó al encolar este curso ya venció "
+                        f"(hace {int((time.time() - vence) // 60)} min). Volvé a "
+                        "encolar el curso desde el popup: lo ya descargado no se "
+                        "vuelve a bajar."
+                    )
                 job._cookiefile = write_netscape_cookiefile(job._cookies)
 
             destino = os.path.join(self.download_dir, job.subfolder or "")
             opts = self._base_opts(job._cookiefile)
+            # El portal sale de la URL que pegó el usuario, no de `job.url`: esa
+            # la generó yt-dlp sobre www y perdió el host de la organización.
+            if (portal := portal_udemy(job._cookie_url or job.url)):
+                opts["portal_udemy"] = portal
             opts.update(
                 {
                     "format": self._format_selector(quality, audio_only),
@@ -525,6 +739,8 @@ class JobManager:
                     # `_recorte_de_nombre`. yt-dlp crea lo que falte al escribir.
                     "paths": {"home": destino},
                     "outtmpl": self._outtmpl(job),
+                    # Recorta por la DERECHA: lo que identifica al archivo tiene
+                    # que estar a la izquierda del título (ver `_outtmpl`).
                     "trim_file_name": self._recorte_de_nombre(destino),
                     "progress_hooks": [lambda d: self._on_progress(job, d)],
                     "postprocessor_hooks": [lambda d: self._on_postprocess(job, d)],
@@ -586,12 +802,20 @@ class JobManager:
                     job.percent = 0.0
         except Cancelled:
             job.status = "cancelled"
+        except SesionVencida as e:
+            job.status = "error"
+            job.error = str(e)
         except yt_dlp.utils.DownloadError as e:
             job.status = "error"
-            job.error = self._explain(str(e))
+            crudo = _ANSI.sub("", str(e)).strip()
+            job.error = explicar(crudo)
+            # Si la traducción no aportó nada nuevo, no se duplica el texto.
+            job.error_detalle = crudo if job.error != crudo else None
+            _registrar_fallo(job, crudo)
         except Exception as e:  # noqa: BLE001 - surface anything else to the UI
             job.status = "error"
             job.error = f"{type(e).__name__}: {e}"
+            _registrar_fallo(job, f"{type(e).__name__}: {e}")
         finally:
             discard(job._cookiefile)
             job._cookiefile = None
@@ -721,6 +945,13 @@ class JobManager:
 # `\x1b[0;31mERROR:\x1b[0m`, que además estorba al leer el mensaje real.
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
+# `"403" in mensaje` matcheaba cualquier texto con esos tres dígitos seguidos, y
+# los ids de clase de Udemy son números de 8 cifras: `37403060` salía traducido
+# como "el sitio respondió 403". Hay que exigir que sea un código HTTP.
+_ES_403 = re.compile(r"\b(?:http\s*error\s*403|status[ :]+403|403[ :]+forbidden|forbidden)\b")
+# Mismo problema con el 429.
+_ES_429 = re.compile(r"\b(?:http\s*error\s*429|status[ :]+429|429[ :]|too many requests)\b")
+
 
 def explicar(message: str) -> str:
     """Turn the most common yt-dlp failures into something actionable."""
@@ -734,17 +965,25 @@ def explicar(message: str) -> str:
     # 429 y 403 antes que el bloque de login: los dos mencionan sesión y
     # cookies en su texto, así que caían en el mensaje genérico de "logueate"
     # — que para un 429 es directamente el consejo equivocado.
-    if "429" in low or "too many requests" in low:
+    if _ES_429.search(low):
         return (
             "El sitio te está frenando por exceso de pedidos (429). Bajá el "
             "ritmo en Opciones (probá 'Paranoico'), esperá un rato y reencolá "
             "el curso: lo ya descargado no se vuelve a bajar."
         )
-    if "403" in low or "forbidden" in low:
+    if _ES_403.search(low):
+        # Este mensaje afirmaba que "casi siempre es la sesión". Era falso: en un
+        # caso real la sesión tenía 87 días de validez y fallaban TODAS las
+        # clases del curso, en orden. Un mensaje traducido se cree más que uno
+        # crudo, así que acá se enumera sin ordenar por probabilidad inventada y
+        # se apunta al dato que sí discrimina.
         return (
-            "El sitio respondió 403. Suele ser una de tres: no estás inscripto "
-            "en ese curso, la sesión venció (reabrí el sitio y volvé a "
-            "intentar), o el enlace del video ya expiró."
+            "El sitio respondió 403 (acceso denegado). Mirá el patrón para saber "
+            "cuál de estas es: si fallan TODAS las clases del curso, no tenés "
+            "acceso a ese curso con esta cuenta; si fallan sólo las últimas, se "
+            "venció la sesión (el popup muestra cuánto le queda); si fallan "
+            "salteadas, el sitio te está frenando y conviene bajar el ritmo. "
+            "El error completo de yt-dlp queda en server/errores.log."
         )
     if "login" in low or "cookies" in low or "account" in low or "private" in low:
         return (

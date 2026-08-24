@@ -15,7 +15,8 @@ from downloader import Job, JobManager, url_de_entrada
 # único que avisa si los dos lados se separan.
 CLAVES_PUBLICAS = {
     "id", "url", "status", "title", "percent", "speed", "eta", "filepath",
-    "error", "wait_seconds", "position", "total", "subfolder", "remote_path",
+    "error", "error_detalle", "wait_seconds", "position", "total", "subfolder",
+    "cookie_url", "remote_path",
 }
 
 
@@ -86,8 +87,23 @@ def test_no_filtra_por_host():
 # ---- plantilla de nombre --------------------------------------------------
 
 
-def test_sin_posicion_no_hay_prefijo():
-    assert JobManager._outtmpl(Job(id="a", url="u")) == "%(title)s [%(id)s].%(ext)s"
+def test_sin_posicion_el_id_va_adelante():
+    """`trim_file_name` recorta por la DERECHA: un id al final es lo primero que
+    se pierde. Medido en Windows, un título largo dejaba
+    `001 - Introduction to System Design and Architectu.mp4`, sin id."""
+    assert JobManager._outtmpl(Job(id="a", url="u")) == "[%(id)s] %(title)s.%(ext)s"
+
+
+@pytest.mark.parametrize("job", [
+    Job(id="a", url="u"),                              # descarga suelta
+    Job(id="a", url="u", position=7, total=200),       # clase de un curso
+])
+def test_lo_que_distingue_sobrevive_al_recorte(job):
+    """Lo único que separa dos archivos tiene que quedar a la izquierda del
+    título, porque el título es lo que se corta."""
+    tmpl = JobManager._outtmpl(job)
+    antes_del_titulo = tmpl.split("%(title)s")[0]
+    assert "%(id)s" in antes_del_titulo or antes_del_titulo.strip(" -").isdigit()
 
 
 @pytest.mark.parametrize(
@@ -211,3 +227,86 @@ def test_lo_que_no_reconoce_pasa_tal_cual():
 )
 def test_destino_sin_barras_duplicadas(base, sub, esperado):
     assert uploader.destino("gdrive", base, sub) == esperado
+
+
+@pytest.mark.parametrize(
+    "mensaje",
+    [
+        # Los ids de clase de Udemy son numeros de 8 cifras: `"403" in mensaje`
+        # matcheaba cualquiera que tuviera esos digitos y lo traducia como un
+        # acceso denegado, que es un diagnostico equivocado y manda al usuario a
+        # revisar su inscripcion en vez del problema real.
+        "ERROR: [udemy] 37403060: Lecture 37403060 is not a video",
+        "ERROR: [udemy] 12403999: Unable to download JSON metadata",
+        "ERROR: [udemy] 42942999: algo raro",
+    ],
+)
+def test_un_id_con_403_o_429_adentro_no_se_traduce(mensaje):
+    assert JobManager._explain(mensaje) == mensaje
+
+
+@pytest.mark.parametrize(
+    ("mensaje", "pista"),
+    [
+        ("ERROR: [udemy] 1: HTTP Error 403: Forbidden", "403"),
+        ("ERROR: [udemy] 1: 403: Forbidden", "403"),
+        ("ERROR: unable to download: HTTP Error 429: Too Many Requests", "429"),
+    ],
+)
+def test_los_codigos_http_de_verdad_si_se_traducen(mensaje, pista):
+    assert pista in JobManager._explain(mensaje)
+
+
+def test_el_mensaje_de_403_no_inventa_una_causa():
+    """Decía "casi siempre es la sesión" y era falso: en un caso real la sesión
+    tenía 87 días de validez y fallaban TODAS las clases del curso. Un mensaje
+    traducido se cree más que uno crudo, así que no puede adivinar."""
+    salida = JobManager._explain("HTTP Error 403: Forbidden")
+    assert "casi siempre" not in salida
+    # Enumera los tres patrones y dice dónde está el error completo.
+    assert "TODAS" in salida and "últimas" in salida and "errores.log" in salida
+
+
+# ---- línea de comando de rclone -------------------------------------------
+
+
+def test_rclone_no_retraduce_los_homoglifos_de_yt_dlp():
+    """Sin esto no se sube NINGÚN archivo con `：` o `？` en el nombre —o sea,
+    cualquier clase cuyo título tenga dos puntos o un signo de pregunta—.
+    rclone traduce esos caracteres en los dos sentidos y termina buscando en
+    disco un nombre que no existe."""
+    cmd = uploader._comando(r"C:\d\02 - Conceptos clave\uff1a x.mp4", "gdrive:Cursos")
+    assert "--local-encoding" in cmd
+    assert cmd[cmd.index("--local-encoding") + 1] == "None"
+
+
+def test_el_comando_de_rclone_conserva_lo_que_ya_estaba():
+    cmd = uploader._comando("/x/y.mp4", "gdrive:Cursos/Mi Curso")
+    assert cmd[:4] == ["rclone", "copy", "/x/y.mp4", "gdrive:Cursos/Mi Curso"]
+    # Sin --no-traverse rclone lista el destino entero antes de subir un archivo.
+    assert "--no-traverse" in cmd
+    assert cmd[cmd.index("--retries") + 1] == "5"
+
+
+def test_el_error_crudo_se_conserva_junto_al_traducido(tmp_path, monkeypatch):
+    """Cuando la traducción se equivoca —pasó— sin el crudo no queda NADA con
+    qué diagnosticar."""
+    import downloader
+
+    monkeypatch.setattr(downloader, "ARCHIVO_ERRORES", str(tmp_path / "errores.log"))
+    job = Job(id="a", url="https://x/y", position=7, total=96, title="Clase 7")
+    crudo = "ERROR: [udemy] 32312110: HTTP Error 403: Forbidden"
+    downloader._registrar_fallo(job, crudo)
+
+    escrito = (tmp_path / "errores.log").read_text(encoding="utf-8")
+    assert crudo in escrito
+    assert "7/96" in escrito
+    assert "https://x/y" in escrito
+
+
+def test_registrar_un_fallo_nunca_tumba_la_descarga(tmp_path, monkeypatch):
+    """Un error al escribir el log no puede costar el video."""
+    import downloader
+
+    monkeypatch.setattr(downloader, "ARCHIVO_ERRORES", str(tmp_path / "no" / "existe" / "e.log"))
+    downloader._registrar_fallo(Job(id="a", url="u"), "algo")   # no debe lanzar

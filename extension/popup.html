@@ -20,6 +20,9 @@
         <button id="pin" class="secondary pin" title="Fijar esta URL para las próximas veces">Fijar</button>
       </div>
       <div id="probe-result" class="probe hidden"></div>
+      <button id="diagnose" class="link hidden"
+              title="Prueba la página y la API con y sin sesión, y dice qué falla exactamente">¿Por qué falla? Diagnosticar</button>
+      <pre id="diagnose-result" class="diag hidden"></pre>
     </section>
 
     <section class="controls">
@@ -50,6 +53,8 @@
       <div class="jobs-head">
         <h2>Descargas</h2>
         <div class="jobs-acciones">
+          <button id="refresh-session" class="link hidden"
+                  title="Vuelve a leer tus cookies del navegador y se las pasa a las clases que faltan">Actualizar sesión</button>
           <button id="cancel-all" class="link hidden">Cancelar todo</button>
           <button id="clear" class="link">Limpiar terminadas</button>
         </div>

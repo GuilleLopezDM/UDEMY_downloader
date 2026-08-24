@@ -22,6 +22,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Iterable, Mapping
 
@@ -200,6 +201,26 @@ def sweep_orphans(*extra_dirs: str) -> list[str]:
 UDEMY_AUTH_COOKIES = ("access_token", "client_id")
 
 
+def vence_en(cookies: Iterable[Mapping]) -> float | None:
+    """Cuándo vencen las cookies de autenticación de Udemy (epoch), o None.
+
+    Importa porque las cookies se capturan UNA sola vez, cuando se encola. Un
+    curso en preset cauteloso son horas: si el token vence en el medio, todas
+    las clases que faltan salen con una sesión muerta y el sitio devuelve 403.
+    Sin este dato, ese fallo es indistinguible de "no estás inscripto".
+
+    Se mira sólo `access_token` y `client_id`: son las que el extractor de Udemy
+    convierte en los headers `X-Udemy-Authorization` / `X-Udemy-Client-Id`. Una
+    cookie de sesión (sin `expirationDate`) no aporta fecha y se ignora.
+    """
+    fechas = [
+        c.get("expirationDate")
+        for c in (cookies or [])
+        if c.get("name") in UDEMY_AUTH_COOKIES and c.get("expirationDate")
+    ]
+    return min(fechas) if fechas else None
+
+
 def summarize(cookies: Iterable[Mapping]) -> str:
     """Describe un set de cookies para el log, SIN exponer ningún valor.
 
@@ -213,7 +234,24 @@ def summarize(cookies: Iterable[Mapping]) -> str:
     domains = {c.get("domain") for c in cookies}
     faltantes = [n for n in UDEMY_AUTH_COOKIES if n not in names]
     estado = "ok" if not faltantes else f"FALTAN {', '.join(faltantes)}"
+
+    # El vencimiento va al log a propósito: es el dato que convierte un 403 a
+    # mitad de un curso en un diagnóstico en vez de una adivinanza.
+    vence = vence_en(cookies)
+    if vence is None:
+        cuando = ""
+    else:
+        restante = vence - time.time()
+        if restante <= 0:
+            cuando = " — sesión VENCIDA"
+        elif restante < 36000:
+            cuando = f" — la sesión vence en {int(restante // 3600)}h{int(restante % 3600 // 60):02d}m"
+        else:
+            # `//` redondea para abajo y 3 días quedaban como "2d": la cuenta es
+            # correcta al segundo pero se lee como un día menos del que queda.
+            cuando = f" — la sesión vence en {round(restante / 86400)}d"
+
     return (
         f"{len(cookies)} cookies de {len(domains)} dominios "
-        f"({', '.join(sorted(d for d in domains if d)[:4])}) — auth Udemy: {estado}"
+        f"({', '.join(sorted(d for d in domains if d)[:4])}) — auth Udemy: {estado}{cuando}"
     )

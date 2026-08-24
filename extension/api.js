@@ -64,6 +64,8 @@ export const api = {
   paths: () => request("/paths"),
   probe: (url, cookies) =>
     request("/probe", { method: "POST", body: { url, cookies }, timeout: TIMEOUT_LARGO_MS }),
+  diagnose: (url, cookies) =>
+    request("/diagnose", { method: "POST", body: { url, cookies }, timeout: TIMEOUT_LARGO_MS }),
   download: (payload) => request("/download", { method: "POST", body: payload }),
   downloadPlaylist: (payload) =>
     request("/download-playlist", { method: "POST", body: payload, timeout: TIMEOUT_LARGO_MS }),
@@ -74,6 +76,8 @@ export const api = {
   saveUpload: (patch) => request("/upload-settings", { method: "POST", body: patch }),
   cancel: (id) => request(`/jobs/${id}/cancel`, { method: "POST" }),
   cancelAll: () => request("/jobs/cancel-all", { method: "POST" }),
+  refreshCookies: (cookies) =>
+    request("/jobs/refresh-cookies", { method: "POST", body: { cookies } }),
   clear: () => request("/jobs/clear", { method: "POST" }),
 };
 

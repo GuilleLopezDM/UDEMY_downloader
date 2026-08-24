@@ -25,6 +25,7 @@ import throttle as throttle_cfg
 import upload_config
 import uploader
 from cookies import cookie_dir, summarize, sweep_orphans
+from diagnostico import diagnosticar
 from downloader import JobManager, explicar
 from redaccion import redact_url
 
@@ -196,6 +197,10 @@ class UploadRequest(BaseModel):
     delete_after: bool | None = None
 
 
+class RefreshCookiesRequest(BaseModel):
+    cookies: list[Cookie]
+
+
 class ProbeRequest(BaseModel):
     url: str
     cookies: list[Cookie] | None = None
@@ -243,6 +248,23 @@ def probe(req: ProbeRequest) -> dict:
         raise HTTPException(status_code=400, detail=explicar(str(e))) from e
 
 
+@app.post("/diagnose", dependencies=[Depends(require_token)])
+def diagnose(req: ProbeRequest) -> dict:
+    """Por qué el sitio responde 403. No descarga nada: pide y mira los estados.
+
+    Existe porque este 403 se resistió a tres hipótesis seguidas y cada una costó
+    un parche. Razonar sobre el código no alcanzaba.
+    """
+    cookies = [c.model_dump() for c in req.cookies] if req.cookies else None
+    print(f"[diag]     {redact_url(req.url)}", flush=True)
+    resultado = diagnosticar(req.url, cookies)
+    for nombre, p in resultado["pruebas"].items():
+        print(f"           {nombre:<32} {p.get('estado')}  {str(p.get('pista') or p.get('error') or '')[:70]}",
+              flush=True)
+    print(f"           => {resultado['lectura']}", flush=True)
+    return resultado
+
+
 @app.post("/download", dependencies=[Depends(require_token)])
 def download(req: DownloadRequest) -> dict:
     cookies = [c.model_dump() for c in req.cookies] if req.cookies else None
@@ -283,7 +305,29 @@ def download_playlist(req: DownloadRequest) -> dict:
 
 @app.get("/jobs", dependencies=[Depends(require_token)])
 def list_jobs() -> dict:
-    return {"jobs": jobs.all()}
+    # `sesion` viaja acá y no en un endpoint aparte para no agregar otra llamada
+    # al polling de 1/s del popup. Es una clave nueva del sobre, no de cada job:
+    # el contrato de `Job.public()` no cambia.
+    return {"jobs": jobs.all(), "sesion": jobs.sesion()}
+
+
+@app.post("/jobs/refresh-cookies", dependencies=[Depends(require_token)])
+def refresh_cookies(req: RefreshCookiesRequest) -> dict:
+    """Reemplaza la sesión de la cola pendiente sin recrear los trabajos.
+
+    Las cookies se capturan una sola vez, al encolar, y un curso dura horas: si
+    el token de Udemy rota en el medio, todo lo que falta sale con una sesión
+    muerta. Esto lo arregla sin perder la cola ni el progreso.
+    """
+    cookies = [c.model_dump() for c in req.cookies]
+    actualizados = jobs.refrescar_cookies(cookies)
+    if actualizados:
+        print(
+            f"[sesión]   refrescada en {actualizados} trabajo(s) pendiente(s)\n"
+            f"           cookies: {summarize(cookies)}",
+            flush=True,
+        )
+    return {"actualizados": actualizados}
 
 
 @app.get("/jobs/{job_id}", dependencies=[Depends(require_token)])
