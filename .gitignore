@@ -22,3 +22,6 @@ credentials.json
 server/upload.json
 server/errores.log
 server/errores.log.1
+
+# Notas locales de trabajo
+.claude/
