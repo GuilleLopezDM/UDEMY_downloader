@@ -1,5 +1,7 @@
 # video-dl
 
+🇬🇧 [English version](README.en.md)
+
 [![Tests](https://github.com/GuilleLopezDM/UDEMY_downloader/actions/workflows/tests.yml/badge.svg)](https://github.com/GuilleLopezDM/UDEMY_downloader/actions/workflows/tests.yml)
 
 Extensión de navegador + servidor local que usa [yt-dlp](https://github.com/yt-dlp/yt-dlp)
