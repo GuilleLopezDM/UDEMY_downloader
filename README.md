@@ -1,5 +1,7 @@
 # video-dl
 
+[![Tests](https://github.com/GuilleLopezDM/UDEMY_downloader/actions/workflows/tests.yml/badge.svg)](https://github.com/GuilleLopezDM/UDEMY_downloader/actions/workflows/tests.yml)
+
 Extensión de navegador + servidor local que usa [yt-dlp](https://github.com/yt-dlp/yt-dlp)
 para descargar videos. Pensada para Udemy, pero funciona con cualquiera de los miles
 de sitios que yt-dlp soporta (Odysee, Vimeo, etc.).
@@ -260,3 +262,5 @@ Corren en menos de un segundo, sin red y sin tocar el servidor: los tests **no**
 importan `app.py` a propósito, porque importarlo crea el `.token` y barre los
 archivos de cookies temporales — un `pytest` mientras baja un curso le rompería
 la sesión.
+
+Son 199 tests y GitHub Actions los corre en Python 3.10 y 3.12 en cada push.
